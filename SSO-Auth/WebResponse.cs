@@ -14,15 +14,72 @@ public static class WebResponse
 <html><head>
 <meta name='viewport' content='width=device-width, initial-scale=1'>
 <style>
+  html, body {
+    height: 100%;
+    margin: 0;
+  }
   body {
     background: #101010;
     color: #d1cfce;
     font-family: Noto Sans, Noto Sans HK, Noto Sans JP, Noto Sans KR, Noto Sans SC, Noto Sans TC, sans-serif;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .sso-card {
+    width: 320px;
+    max-width: 80vw;
+    text-align: center;
+  }
+  .sso-spinner {
+    width: 44px;
+    height: 44px;
+    margin: 0 auto 24px;
+    border: 4px solid rgba(255, 255, 255, 0.15);
+    border-top-color: #00a4dc;
+    border-radius: 50%;
+    animation: sso-spin 0.9s linear infinite;
+  }
+  .sso-status {
+    font-size: 15px;
+    margin: 0 0 20px;
+    color: #d1cfce;
+    min-height: 20px;
+  }
+  .sso-track {
+    width: 100%;
+    height: 4px;
+    background: rgba(255, 255, 255, 0.12);
+    border-radius: 2px;
+    overflow: hidden;
+  }
+  .sso-bar {
+    width: 40%;
+    height: 100%;
+    background: #00a4dc;
+    border-radius: 2px;
+    animation: sso-indeterminate 1.4s ease-in-out infinite;
+  }
+  .sso-bar.sso-error {
+    width: 100%;
+    background: #c84a4a;
+    animation: none;
+  }
+  @keyframes sso-spin {
+    to { transform: rotate(360deg); }
+  }
+  @keyframes sso-indeterminate {
+    0% { margin-left: -40%; }
+    100% { margin-left: 100%; }
   }
 </style>
 </head><body>
-<p>Logging in...</p>
-<noscript>Please enable Javascript to complete the login</noscript>
+<div class='sso-card'>
+  <div class='sso-spinner' id='sso-spinner'></div>
+  <p class='sso-status' id='sso-status'>Logging in...</p>
+  <div class='sso-track'><div class='sso-bar' id='sso-bar'></div></div>
+  <noscript>Please enable Javascript to complete the login</noscript>
+</div>
 <script>
 
 function isTv() {
@@ -402,6 +459,19 @@ const sleep = (milliseconds) => {
     return new Promise(resolve => setTimeout(resolve, milliseconds))
 }
 
+function setStatus(text) {
+    const el = document.getElementById('sso-status');
+    if (el) el.textContent = text;
+}
+
+function setError(text) {
+    setStatus(text);
+    const spinner = document.getElementById('sso-spinner');
+    if (spinner) spinner.style.display = 'none';
+    const bar = document.getElementById('sso-bar');
+    if (bar) bar.classList.add('sso-error');
+}
+
 ";
 
     /// <summary>
@@ -463,6 +533,7 @@ async function main() {
     localStorage.removeItem('jellyfin_credentials');
     document.getElementById('iframe-main').src = '" + punycodeBaseUrl + @"/web/index.html';
 
+    setStatus('Connecting to your account...');
     var data = '" + data + @"';
     while (localStorage.getItem(""_deviceId2"") == null ||
         localStorage.getItem(""jellyfin_credentials"") == null ||
@@ -477,8 +548,12 @@ async function main() {
 
     var request = {deviceId, appName, appVersion, deviceName, data};
 
-    if (" + $"{isLinking}".ToLower() + @") await link(request);
+    if (" + $"{isLinking}".ToLower() + @") {
+        setStatus('Linking your account...');
+        await link(request);
+    }
 
+    setStatus('Signing you in...');
     var url = '" + punycodeBaseUrl + "/sso/" + mode + "/Auth/" + provider + @"';
 
     let response = await new Promise(resolve => {
@@ -494,7 +569,21 @@ async function main() {
        };
        xhr.send(JSON.stringify(request));
     })
-    var responseJson = JSON.parse(response);
+
+    var responseJson;
+    try {
+        responseJson = JSON.parse(response);
+    } catch (e) {
+        setError('Login failed. Please return to the login page and try again.');
+        return;
+    }
+
+    if (!responseJson || !responseJson['User'] || !responseJson['AccessToken']) {
+        setError('Login failed. Please return to the login page and try again.');
+        return;
+    }
+
+    setStatus('Success! Redirecting...');
     var userId = 'user-' + responseJson['User']['Id'] + '-' + responseJson['User']['ServerId'];
     responseJson['User']['EnableAutoLogin'] = true;
     localStorage.setItem(userId, JSON.stringify(responseJson['User']));
@@ -507,7 +596,10 @@ async function main() {
 }
 
 document.addEventListener('DOMContentLoaded', function () {
-    main();
+    main().catch(function (e) {
+        console.log(e);
+        setError('Something went wrong during login. Please try again.');
+    });
 });
 
 // https://stackoverflow.com/a/25435165

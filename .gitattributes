@@ -1,0 +1,33 @@
+# Normalize line endings: text files use LF in the repo
+* text=auto eol=lf
+
+# Explicit text types
+*.cs    text eol=lf
+*.fs    text eol=lf
+*.csproj text eol=lf
+*.fsproj text eol=lf
+*.sln   text eol=lf
+*.js    text eol=lf
+*.html  text eol=lf
+*.css   text eol=lf
+*.md    text eol=lf
+*.yaml  text eol=lf
+*.yml   text eol=lf
+*.nix   text eol=lf
+*.json  text eol=lf
+*.ruleset text eol=lf
+
+# Windows-specific scripts keep CRLF
+*.bat   text eol=crlf
+*.cmd   text eol=crlf
+*.ps1   text eol=crlf
+
+# Binary files (never normalize)
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.gif   binary
+*.mp4   binary
+*.ico   binary
+*.dll   binary
+*.pdb   binary

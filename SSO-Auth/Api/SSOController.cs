@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -48,7 +49,7 @@ public class SSOController : ControllerBase
     private readonly IProviderManager _providerManager;
     private readonly IServerConfigurationManager _serverConfigurationManager;
     private readonly IHttpClientFactory _httpClientFactory;
-    private static readonly IDictionary<string, TimedAuthorizeState> StateManager = new Dictionary<string, TimedAuthorizeState>();
+    private static readonly ConcurrentDictionary<string, TimedAuthorizeState> StateManager = new ConcurrentDictionary<string, TimedAuthorizeState>();
 
     /// <summary>
     /// Initializes a new instance of the <see cref="SSOController"/> class.
@@ -120,7 +121,7 @@ public class SSOController : ControllerBase
                 return BadRequest("Invalid or expired state");
             }
 
-            var scopes = config.OidScopes == null ? new string[2] : config.OidScopes;
+            var scopes = config.OidScopes ?? Array.Empty<string>();
             var options = new OidcClientOptions
             {
                 Authority = config.OidEndpoint?.Trim(),
@@ -320,7 +321,7 @@ public class SSOController : ControllerBase
                     if (claim.Type == "sub")
                     {
                         timedState.Username = claim.Value;
-                        if (config.Roles.Length == 0)
+                        if (config.Roles == null || config.Roles.Length == 0)
                         {
                             timedState.Valid = true;
                         }
@@ -383,13 +384,14 @@ public class SSOController : ControllerBase
 
             string redirectUri = GetRequestBase(config.SchemeOverride, config.PortOverride) + $"/sso/OID/{(newPath ? "redirect" : "r")}/" + provider;
 
+            var scopes = config.OidScopes ?? Array.Empty<string>();
             var options = new OidcClientOptions
             {
                 Authority = config.OidEndpoint?.Trim(),
                 ClientId = config.OidClientId?.Trim(),
                 ClientSecret = config.OidSecret?.Trim(),
                 RedirectUri = redirectUri,
-                Scope = string.Join(" ", config.OidScopes.Prepend("openid profile")),
+                Scope = string.Join(" ", scopes.Prepend("openid profile")),
                 DisablePushedAuthorization = config.DisablePushedAuthorization,
                 LoggerFactory = _loggerFactory,
                 LoadProfile = !config.DoNotLoadProfile,
@@ -417,7 +419,7 @@ public class SSOController : ControllerBase
                 return ReturnError(StatusCodes.Status400BadRequest, $"Error preparing login: {state.Error} - {state.ErrorDescription}");
             }
 
-            StateManager.Add(state.State, new TimedAuthorizeState(state, DateTime.Now));
+            StateManager[state.State] = new TimedAuthorizeState(state, DateTime.UtcNow);
 
             // Track whether this is a linking request or not.
             StateManager[state.State].IsLinking = isLinking;
@@ -537,7 +539,7 @@ public class SSOController : ControllerBase
                         config.DefaultProvider?.Trim(),
                         kvp.Value.AvatarURL)
                         .ConfigureAwait(false);
-                    StateManager.Remove(kvp.Key);
+                    StateManager.TryRemove(kvp.Key, out _);
                     return Ok(authenticationResult);
                 }
             }
@@ -586,19 +588,22 @@ public class SSOController : ControllerBase
             bool valid = false;
 
             // If no roles are configured, don't use RBAC
-            if (config.Roles.Length == 0)
+            if (config.Roles == null || config.Roles.Length == 0)
             {
                 valid = true;
             }
 
             // Check if user is allowed to log in based on roles
-            foreach (string role in samlResponse.GetCustomAttributes("Role"))
+            if (config.Roles != null)
             {
-                foreach (string allowedRole in config.Roles)
+                foreach (string role in samlResponse.GetCustomAttributes("Role"))
                 {
-                    if (allowedRole.Equals(role))
+                    foreach (string allowedRole in config.Roles)
                     {
-                        valid = true;
+                        if (allowedRole.Equals(role))
+                        {
+                            valid = true;
+                        }
                     }
                 }
             }
@@ -838,10 +843,11 @@ public class SSOController : ControllerBase
     /// <returns>Whether this API endpoint succeeded.</returns>
     [Authorize(Policy = Policies.RequiresElevation)]
     [HttpPost("Unregister/{username}")]
-    public ActionResult Unregister(string username, [FromBody] string provider)
+    public async Task<ActionResult> Unregister(string username, [FromBody] string provider)
     {
         User user = _userManager.GetUserByName(username);
         user.AuthenticationProviderId = provider;
+        await _userManager.UpdateUserAsync(user).ConfigureAwait(false);
 
         return Ok();
     }
@@ -1270,12 +1276,12 @@ public class SSOController : ControllerBase
 
     private void Invalidate()
     {
+        var now = DateTime.UtcNow;
         foreach (var kvp in StateManager)
         {
-            var now = DateTime.Now;
             if (now.Subtract(kvp.Value.Created).TotalMinutes > 1)
             {
-                StateManager.Remove(kvp.Key);
+                StateManager.TryRemove(kvp.Key, out _);
             }
         }
     }

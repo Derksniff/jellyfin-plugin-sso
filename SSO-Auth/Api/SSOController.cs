@@ -1254,6 +1254,13 @@ public class SSOController : ControllerBase
         user.SetPermission(PermissionKind.EnableLiveTvAccess, enableLiveTv);
         user.SetPermission(PermissionKind.EnableLiveTvManagement, enableLiveTvAdmin);
 
+        // Apply the default provider before saving so the user is persisted only once per login.
+        if (!string.IsNullOrEmpty(defaultProvider))
+        {
+            user.AuthenticationProviderId = defaultProvider;
+            _logger.LogInformation("Set default login provider to " + defaultProvider);
+        }
+
         await _userManager.UpdateUserAsync(user).ConfigureAwait(false);
 
         var authRequest = new AuthenticationRequest();
@@ -1264,12 +1271,6 @@ public class SSOController : ControllerBase
         authRequest.DeviceId = authResponse.DeviceID;
         authRequest.DeviceName = authResponse.DeviceName;
         _logger.LogInformation("Auth request created...");
-        if (!string.IsNullOrEmpty(defaultProvider))
-        {
-            user.AuthenticationProviderId = defaultProvider;
-            await _userManager.UpdateUserAsync(user).ConfigureAwait(false);
-            _logger.LogInformation("Set default login provider to " + defaultProvider);
-        }
 
         return await _sessionManager.AuthenticateDirect(authRequest).ConfigureAwait(false);
     }

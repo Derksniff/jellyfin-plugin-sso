@@ -51,6 +51,12 @@ public class SSOController : ControllerBase
     private readonly IHttpClientFactory _httpClientFactory;
     private static readonly ConcurrentDictionary<string, TimedAuthorizeState> StateManager = new ConcurrentDictionary<string, TimedAuthorizeState>();
 
+    // Caches the OIDC discovery document (endpoints + signing keys) per provider so we don't
+    // re-run discovery on every login. OidcClient otherwise fetches .well-known + JWKS on each
+    // request, which adds multiple round trips to the IdP per sign-in.
+    private static readonly ConcurrentDictionary<string, CachedProviderInfo> DiscoveryCache = new ConcurrentDictionary<string, CachedProviderInfo>();
+    private static readonly TimeSpan DiscoveryCacheTtl = TimeSpan.FromMinutes(15);
+
     /// <summary>
     /// Initializes a new instance of the <see cref="SSOController"/> class.
     /// </summary>
@@ -147,9 +153,16 @@ public class SSOController : ControllerBase
             options.Policy.Discovery.ValidateEndpoints = !config.DoNotValidateEndpoints; // For Google and other providers with different endpoints
             options.Policy.Discovery.RequireHttps = !config.DisableHttps;
             options.Policy.Discovery.ValidateIssuerName = !config.DoNotValidateIssuerName;
+            options.RefreshDiscoveryOnSignatureFailure = true;
+            var cacheKey = DiscoveryCacheKey(provider, config);
+            bool cacheHit = TryApplyCachedDiscovery(options, cacheKey);
             var oidcClient = new OidcClient(options);
             var currentState = timedState.State;
             var result = await oidcClient.ProcessResponseAsync(Request.QueryString.Value, currentState).ConfigureAwait(false);
+            if (!cacheHit)
+            {
+                StoreDiscovery(options, cacheKey);
+            }
 
             if (result.IsError)
             {
@@ -411,8 +424,15 @@ public class SSOController : ControllerBase
             options.Policy.Discovery.ValidateEndpoints = !config.DoNotValidateEndpoints; // For Google and other providers with different endpoints
             options.Policy.Discovery.RequireHttps = !config.DisableHttps;
             options.Policy.Discovery.ValidateIssuerName = !config.DoNotValidateIssuerName;
+            options.RefreshDiscoveryOnSignatureFailure = true;
+            var cacheKey = DiscoveryCacheKey(provider, config);
+            bool cacheHit = TryApplyCachedDiscovery(options, cacheKey);
             var oidcClient = new OidcClient(options);
             var state = await oidcClient.PrepareLoginAsync().ConfigureAwait(false);
+            if (!cacheHit)
+            {
+                StoreDiscovery(options, cacheKey);
+            }
 
             if (state.IsError)
             {
@@ -1319,6 +1339,33 @@ public class SSOController : ControllerBase
         }.ToString().TrimEnd('/');
     }
 
+    private static string DiscoveryCacheKey(string provider, OidConfig config)
+    {
+        // Keyed on endpoint too, so changing the provider's endpoint invalidates the cache.
+        return provider + "|" + (config.OidEndpoint?.Trim() ?? string.Empty);
+    }
+
+    // Reuses a previously-discovered OIDC document if it is still fresh, letting OidcClient skip discovery.
+    private static bool TryApplyCachedDiscovery(OidcClientOptions options, string cacheKey)
+    {
+        if (DiscoveryCache.TryGetValue(cacheKey, out var cached) && DateTime.UtcNow - cached.CachedAt < DiscoveryCacheTtl)
+        {
+            options.ProviderInformation = cached.Info;
+            return true;
+        }
+
+        return false;
+    }
+
+    // Stores the discovery document that OidcClient populates on the options after a cache miss.
+    private static void StoreDiscovery(OidcClientOptions options, string cacheKey)
+    {
+        if (options.ProviderInformation != null)
+        {
+            DiscoveryCache[cacheKey] = new CachedProviderInfo(options.ProviderInformation, DateTime.UtcNow);
+        }
+    }
+
     private ContentResult ReturnError(int code, string message)
     {
         var errorResult = new ContentResult();
@@ -1358,6 +1405,33 @@ public class AuthResponse
     /// Gets or sets the auth data of the client (for authorizing the response).
     /// </summary>
     public string Data { get; set; }
+}
+
+/// <summary>
+/// A cached OIDC discovery document with the time it was fetched.
+/// </summary>
+internal sealed class CachedProviderInfo
+{
+    /// <summary>
+    /// Initializes a new instance of the <see cref="CachedProviderInfo"/> class.
+    /// </summary>
+    /// <param name="info">The discovered provider information.</param>
+    /// <param name="cachedAt">When the information was cached.</param>
+    public CachedProviderInfo(Duende.IdentityModel.OidcClient.ProviderInformation info, DateTime cachedAt)
+    {
+        Info = info;
+        CachedAt = cachedAt;
+    }
+
+    /// <summary>
+    /// Gets the discovered provider information.
+    /// </summary>
+    public Duende.IdentityModel.OidcClient.ProviderInformation Info { get; }
+
+    /// <summary>
+    /// Gets the time the information was cached.
+    /// </summary>
+    public DateTime CachedAt { get; }
 }
 
 /// <summary>

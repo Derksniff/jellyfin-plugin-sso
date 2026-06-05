@@ -1,7 +1,7 @@
 name: "SSO Authentication"
 guid: "505ce9d1-d916-42fa-86ca-673ef241d7df"
 imageUrl: "https://raw.githubusercontent.com/9p4/jellyfin-plugin-sso/main/img/logo.png"
-version: "4.0.0.5"
+version: "4.0.0.6"
 targetAbi: "10.11.0.0"
 framework: "net9.0"
 owner: "9p4"
@@ -15,6 +15,7 @@ artifacts:
   - "Duende.IdentityModel.OidcClient.dll"
   - "Duende.IdentityModel.dll"
 changelog: |
+  4.0.0.6: Loading screen polish - branding logo, provider name, stuck/error buttons, fade-in, accessibility, correct device version
   4.0.0.5: Cache OIDC discovery per provider to cut login round trips; animated login loading screen; bug fixes (state cleanup crash, thread-safety, Unregister, null guards)
   4.0.0.4: Fix security issue in SAML
   4.0.0.0: Jellyfin 10.11

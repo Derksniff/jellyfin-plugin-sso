@@ -9,6 +9,14 @@
     "imageUrl": "https://raw.githubusercontent.com/Derksniff/jellyfin-plugin-sso/main/img/logo.png",
     "versions": [
       {
+        "version": "4.0.0.7",
+        "changelog": "The loading page now renders before the OpenID token exchange, so users see \"Connecting to your account...\" immediately instead of a blank tab while the provider is contacted. Login logo replaced with a padlock icon.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/Derksniff/jellyfin-plugin-sso/releases/download/v4.0.0.7/sso-auth_4.0.0.7.zip",
+        "checksum": "1f390598b95492b38396f6e22799cdda",
+        "timestamp": "2026-06-05T23:37:09Z"
+      },
+      {
         "version": "4.0.0.6",
         "changelog": "Loading screen polish: branding logo, provider name in status, stuck/error buttons, fade-in, accessibility, and correct device version reported to Jellyfin.",
         "targetAbi": "10.11.0.0",

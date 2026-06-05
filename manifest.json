@@ -15,30 +15,6 @@
         "sourceUrl": "https://github.com/Derksniff/jellyfin-plugin-sso/releases/download/v4.0.0.7/sso-auth_4.0.0.7.zip",
         "checksum": "1f390598b95492b38396f6e22799cdda",
         "timestamp": "2026-06-05T23:37:09Z"
-      },
-      {
-        "version": "4.0.0.6",
-        "changelog": "Loading screen polish: branding logo, provider name in status, stuck/error buttons, fade-in, accessibility, and correct device version reported to Jellyfin.",
-        "targetAbi": "10.11.0.0",
-        "sourceUrl": "https://github.com/Derksniff/jellyfin-plugin-sso/releases/download/v4.0.0.6/sso-auth_4.0.0.6.zip",
-        "checksum": "4dd8c5b51947c6c8326f75152b8165df",
-        "timestamp": "2026-06-05T18:43:42Z"
-      },
-      {
-        "version": "4.0.0.5",
-        "changelog": "Cache OIDC discovery per provider (endpoints + signing keys, 15-min TTL) to cut IdP round trips on every login. Includes the 4.0.0.4 fork changes (loading screen, crash/thread-safety/null-guard fixes).",
-        "targetAbi": "10.11.0.0",
-        "sourceUrl": "https://github.com/Derksniff/jellyfin-plugin-sso/releases/download/v4.0.0.5/sso-auth_4.0.0.5.zip",
-        "checksum": "4bbdc23881e139a7e567298c3c099488",
-        "timestamp": "2026-06-04T01:55:12Z"
-      },
-      {
-        "version": "4.0.0.4",
-        "changelog": "Patched fork: animated login loading screen, fixed OIDC state cleanup crash, thread-safe auth state, working Unregister, null guards for empty scopes/roles, UTC state timing.",
-        "targetAbi": "10.11.0.0",
-        "sourceUrl": "https://github.com/Derksniff/jellyfin-plugin-sso/releases/download/v4.0.0.4/sso-auth_4.0.0.4.zip",
-        "checksum": "b0cced7c2e42ac443ab854d2a39519ad",
-        "timestamp": "2026-06-04T01:19:21Z"
       }
     ]
   }

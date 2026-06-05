@@ -8,6 +8,7 @@ using System.Net.Mime;
 using System.Reflection;
 using System.Security.Cryptography;
 using System.Text.RegularExpressions;
+using System.Threading;
 using System.Threading.Tasks;
 using Duende.IdentityModel.OidcClient;
 using Jellyfin.Data;
@@ -101,7 +102,7 @@ public class SSOController : ControllerBase
     // Actually a GET: https://github.com/IdentityModel/IdentityModel.OidcClient/issues/325
     [HttpGet("OID/r/{provider}")]
     [HttpGet("OID/redirect/{provider}")]
-    public async Task<ActionResult> OidPost(
+    public ActionResult OidPost(
         [FromRoute] string provider,
         [FromQuery] string state) // Although this is a GET function, this function is called `Post` for consistency with SAML
     {
@@ -127,13 +128,43 @@ public class SSOController : ControllerBase
                 return BadRequest("Invalid or expired state");
             }
 
+            // Defer the provider token exchange until the client POSTs back to
+            // /OID/Auth (or /Link): stash the raw callback query, then return the
+            // loading page immediately. The slow provider round-trip then runs
+            // while the user is already seeing "Connecting to your account..."
+            // instead of a blank browser tab.
+            timedState.CallbackQuery = Request.QueryString.Value;
+
+            return Content(WebResponse.Generator(data: state, provider: provider, baseUrl: GetRequestBase(config.SchemeOverride, config.PortOverride), mode: "OID", isLinking: timedState.IsLinking), MediaTypeNames.Text.Html);
+        }
+
+        return BadRequest("No matching provider found");
+    }
+
+    /// <summary>
+    /// Exchanges a deferred OpenID callback (see <see cref="OidPost"/>) with the provider,
+    /// populating the supplied state with the resulting claims, roles, and access decisions.
+    /// </summary>
+    /// <param name="provider">The provider being authenticated against.</param>
+    /// <param name="config">The provider configuration.</param>
+    /// <param name="timedState">The pending login state, populated in place.</param>
+    /// <returns>Null on success; otherwise a human-readable error message.</returns>
+    private async Task<string> ProcessOidResponse(string provider, OidConfig config, TimedAuthorizeState timedState)
+    {
+        if (string.IsNullOrEmpty(timedState.CallbackQuery))
+        {
+            return "Missing or expired login state";
+        }
+
+        if (config.Enabled)
+        {
             var scopes = config.OidScopes ?? Array.Empty<string>();
             var options = new OidcClientOptions
             {
                 Authority = config.OidEndpoint?.Trim(),
                 ClientId = config.OidClientId?.Trim(),
                 ClientSecret = config.OidSecret?.Trim(),
-                RedirectUri = GetRequestBase(config.SchemeOverride, config.PortOverride) + $"/sso/OID/{(Request.Path.Value.Contains("/start/", StringComparison.InvariantCultureIgnoreCase) ? "redirect" : "r")}/" + provider,
+                RedirectUri = timedState.RedirectUri,
                 Scope = string.Join(" ", scopes.Prepend("openid profile")),
                 DisablePushedAuthorization = config.DisablePushedAuthorization,
                 LoggerFactory = _loggerFactory,
@@ -158,7 +189,7 @@ public class SSOController : ControllerBase
             bool cacheHit = TryApplyCachedDiscovery(options, cacheKey);
             var oidcClient = new OidcClient(options);
             var currentState = timedState.State;
-            var result = await oidcClient.ProcessResponseAsync(Request.QueryString.Value, currentState).ConfigureAwait(false);
+            var result = await oidcClient.ProcessResponseAsync(timedState.CallbackQuery, currentState).ConfigureAwait(false);
             if (!cacheHit)
             {
                 StoreDiscovery(options, cacheKey);
@@ -166,7 +197,7 @@ public class SSOController : ControllerBase
 
             if (result.IsError)
             {
-                return ReturnError(StatusCodes.Status400BadRequest, $"Error logging in: {result.Error} - {result.ErrorDescription}");
+                return $"Error logging in: {result.Error} - {result.ErrorDescription}";
             }
 
             if (!config.EnableFolderRoles && config.EnabledFolders != null)
@@ -342,27 +373,55 @@ public class SSOController : ControllerBase
                 }
             }
 
-            bool isLinking = timedState.IsLinking;
-
             if (timedState.Valid)
             {
-                _logger.LogInformation($"Is request linking: {isLinking}");
-                return Content(WebResponse.Generator(data: state, provider: provider, baseUrl: GetRequestBase(config.SchemeOverride, config.PortOverride), mode: "OID", isLinking: isLinking), MediaTypeNames.Text.Html);
+                return null;
             }
-            else
-            {
-                _logger.LogWarning(
-                    "OpenID user {Username} has one or more incorrect role claims: {@Claims}. Expected any one of: {@ExpectedClaims}",
-                    timedState.Username,
-                    result.User.Claims.Select(o => new { o.Type, o.Value }),
-                    config.Roles);
 
-                return ReturnError(StatusCodes.Status401Unauthorized, "Error. Check permissions.");
-            }
+            _logger.LogWarning(
+                "OpenID user {Username} has one or more incorrect role claims: {@Claims}. Expected any one of: {@ExpectedClaims}",
+                timedState.Username,
+                result.User.Claims.Select(o => new { o.Type, o.Value }),
+                config.Roles);
+
+            return "Error. Check permissions.";
         }
 
-        // If the config doesn't have an active provider matching the requeset, show an error
-        return BadRequest("No matching provider found");
+        // If the config doesn't have an active provider matching the request, show an error
+        return "No matching provider found";
+    }
+
+    /// <summary>
+    /// Ensures the deferred OpenID callback for the given state is exchanged with the
+    /// provider exactly once, caching the outcome so the linking and auth POSTs from
+    /// the loading page don't replay the single-use authorization code.
+    /// </summary>
+    /// <param name="provider">The provider being authenticated against.</param>
+    /// <param name="config">The provider configuration.</param>
+    /// <param name="timedState">The pending login state.</param>
+    /// <returns>Null on success; otherwise a human-readable error message.</returns>
+    private async Task<string> EnsureOidStateProcessed(string provider, OidConfig config, TimedAuthorizeState timedState)
+    {
+        if (timedState.Processed)
+        {
+            return timedState.ProcessError;
+        }
+
+        await timedState.ProcessLock.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            if (!timedState.Processed)
+            {
+                timedState.ProcessError = await ProcessOidResponse(provider, config, timedState).ConfigureAwait(false);
+                timedState.Processed = true;
+            }
+        }
+        finally
+        {
+            timedState.ProcessLock.Release();
+        }
+
+        return timedState.ProcessError;
     }
 
     /// <summary>
@@ -443,6 +502,10 @@ public class SSOController : ControllerBase
 
             // Track whether this is a linking request or not.
             StateManager[state.State].IsLinking = isLinking;
+
+            // Persist the redirect URI so the deferred token exchange (run from the
+            // /OID/Auth or /Link POST) replays the exact value sent to the provider.
+            StateManager[state.State].RedirectUri = redirectUri;
             return Redirect(state.StartUrl);
         }
 
@@ -543,8 +606,22 @@ public class SSOController : ControllerBase
         {
             foreach (var kvp in StateManager)
             {
-                if (kvp.Value.State.State.Equals(response.Data) && kvp.Value.Valid)
+                if (kvp.Value.State.State.Equals(response.Data))
                 {
+                    // Perform the deferred provider token exchange now (see OidPost), so it
+                    // runs while the loading page is already on screen rather than before it.
+                    var error = await EnsureOidStateProcessed(provider, config, kvp.Value).ConfigureAwait(false);
+                    if (error != null)
+                    {
+                        StateManager.TryRemove(kvp.Key, out _);
+                        return Problem(error);
+                    }
+
+                    if (!kvp.Value.Valid)
+                    {
+                        continue;
+                    }
+
                     Guid userId = await CreateCanonicalLinkAndUserIfNotExist("oid", provider, kvp.Value.Username);
 
                     var authenticationResult = await Authenticate(
@@ -991,7 +1068,7 @@ public class SSOController : ControllerBase
             case "saml":
                 return SamlLink(provider, jellyfinUserId, authResponse);
             case "oid":
-                return OidLink(provider, jellyfinUserId, authResponse);
+                return await OidLink(provider, jellyfinUserId, authResponse);
             default:
                 throw new ArgumentException($"{mode} is not a valid choice between 'saml' and 'oid'");
         }
@@ -1134,7 +1211,7 @@ public class SSOController : ControllerBase
     /// <returns>JSON for the client to populate information with.</returns>
     [Consumes(MediaTypeNames.Application.Json)]
     [Produces(MediaTypeNames.Application.Json)]
-    private ActionResult OidLink(string provider, Guid jellyfinUserId, AuthResponse response)
+    private async Task<ActionResult> OidLink(string provider, Guid jellyfinUserId, AuthResponse response)
     {
         OidConfig config;
         try
@@ -1148,10 +1225,21 @@ public class SSOController : ControllerBase
 
         foreach (var kvp in StateManager)
         {
-            if (kvp.Value.State.State.Equals(response.Data) && kvp.Value.Valid)
+            if (kvp.Value.State.State.Equals(response.Data))
             {
-                string providerUserId = kvp.Value.Username;
-                return CreateCanonicalLink("oid", provider, jellyfinUserId, providerUserId);
+                // The linking POST arrives before the auth POST, so run the deferred
+                // provider token exchange here if it hasn't happened yet (see OidPost).
+                var error = await EnsureOidStateProcessed(provider, config, kvp.Value).ConfigureAwait(false);
+                if (error != null)
+                {
+                    return Problem(error);
+                }
+
+                if (kvp.Value.Valid)
+                {
+                    string providerUserId = kvp.Value.Username;
+                    return CreateCanonicalLink("oid", provider, jellyfinUserId, providerUserId);
+                }
             }
         }
 
@@ -1454,6 +1542,9 @@ public class TimedAuthorizeState
         EnableLiveTv = false;
         EnableLiveTvManagement = false;
         AvatarURL = null;
+        Processed = false;
+        ProcessError = null;
+        ProcessLock = new SemaphoreSlim(1, 1);
     }
 
     /// <summary>
@@ -1506,4 +1597,29 @@ public class TimedAuthorizeState
     /// Gets or sets the user avatar url.
     /// </summary>
     public string AvatarURL { get; set; }
+
+    /// <summary>
+    /// Gets or sets the redirect URI used for this login, replayed during the deferred token exchange.
+    /// </summary>
+    public string RedirectUri { get; set; }
+
+    /// <summary>
+    /// Gets or sets the raw provider callback query string, stashed until the deferred token exchange.
+    /// </summary>
+    public string CallbackQuery { get; set; }
+
+    /// <summary>
+    /// Gets or sets a value indicating whether the deferred token exchange has been attempted.
+    /// </summary>
+    public bool Processed { get; set; }
+
+    /// <summary>
+    /// Gets or sets the error message from the deferred token exchange, if any (null on success).
+    /// </summary>
+    public string ProcessError { get; set; }
+
+    /// <summary>
+    /// Gets the lock guarding the deferred token exchange so it runs exactly once.
+    /// </summary>
+    public SemaphoreSlim ProcessLock { get; private set; }
 }

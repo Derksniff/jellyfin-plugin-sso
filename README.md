@@ -2,27 +2,24 @@
 
 <p align="center">
 
-<img alt="Logo" src="https://raw.githubusercontent.com/9p4/jellyfin-plugin-sso/main/img/logo.png"/>
+<img alt="Logo" src="https://raw.githubusercontent.com/Derksniff/jellyfin-plugin-sso/main/img/logo.png"/>
 <br/>
 <br/>
-<a href="https://github.com/9p4/jellyfin-plugin-sso">
-<img alt="GPL 3.0 License" src="https://img.shields.io/github/license/9p4/jellyfin-plugin-sso.svg"/>
+<a href="https://github.com/Derksniff/jellyfin-plugin-sso">
+<img alt="GPL 2.0 License" src="https://img.shields.io/github/license/Derksniff/jellyfin-plugin-sso.svg"/>
 </a>
-<a href="https://github.com/9p4/jellyfin-plugin-sso/actions/workflows/dotnet.yml">
-<img alt="GitHub Actions Build Status" src="https://github.com/9p4/jellyfin-plugin-sso/actions/workflows/dotnet.yml/badge.svg"/>
+<a href="https://github.com/Derksniff/jellyfin-plugin-sso/releases">
+<img alt="Current Release" src="https://img.shields.io/github/release/Derksniff/jellyfin-plugin-sso.svg"/>
 </a>
-<a href="https://github.com/9p4/jellyfin-plugin-sso/releases">
-<img alt="Current Release" src="https://img.shields.io/github/release/9p4/jellyfin-plugin-sso.svg"/>
-</a>
-<a href="https://github.com/9p4/jellyfin-plugin-sso/releases.atom">
+<a href="https://github.com/Derksniff/jellyfin-plugin-sso/releases.atom">
 <img alt="Release RSS Feed" src="https://img.shields.io/badge/rss-releases-ffa500?logo=rss" />
 </a>
-<a href="https://github.com/9p4/jellyfin-plugin-sso/commits/main.atom">
+<a href="https://github.com/Derksniff/jellyfin-plugin-sso/commits/main.atom">
 <img alt="Main Commits RSS Feed" src="https://img.shields.io/badge/rss-commits-ffa500?logo=rss" />
 </a>
 </p>
 
-Project archived because I'm tired of working on this after all the years.
+> **This is a continued fork.** The original [9p4/jellyfin-plugin-sso](https://github.com/9p4/jellyfin-plugin-sso) has been archived by its author. This fork picks up maintenance — it's updated for **Jellyfin 10.11** (targeting `net9.0`), with a faster, friendlier sign-in experience and ongoing bug fixes. See [What's new in the 4.x fork](#whats-new-in-the-4x-fork) below.
 
 This plugin allows users to sign in through an SSO provider (such as Google, Microsoft, or your own provider). This enables one-click signin.
 
@@ -30,15 +27,21 @@ https://user-images.githubusercontent.com/17993169/149681516-f93b43f5-fa5c-4c1f-
 
 Existing users may link new SSO accounts, or remove existing links using self-service at `/SSOViews/linking`.
 
-## Current State:
+## Current State
 
-This is 100% alpha software! PRs are welcome to improve the code.
+This fork is actively maintained for Jellyfin 10.11. The plugin has an admin configuration page (so the API is optional, not mandatory), supports OpenID and SAML, and ships an improved login loading screen. PRs are welcome.
 
-~~There is NO admin configuration! You must use the API to configure the program!~~ Added by [strazto](https://github.com/strazto) in PR [#18](https://github.com/9p4/jellyfin-plugin-sso/pull/18) and [#27](https://github.com/9p4/jellyfin-plugin-sso/pull/27).
-
-**[This is for Jellyfin >=10.8](https://github.com/9p4/jellyfin-plugin-sso/issues/3) and only on the Web UI or clients supporting [Quick Connect](https://jellyfin.org/docs/general/server/quick-connect)**
+**This is for [Jellyfin 10.11](https://jellyfin.org/), and works on the Web UI or clients supporting [Quick Connect](https://jellyfin.org/docs/general/server/quick-connect).** For older Jellyfin versions (10.8–10.10), use a matching tag/release of the original [9p4 plugin](https://github.com/9p4/jellyfin-plugin-sso).
 
 **This README reflects the branch it is currently on! Switch tags to view version-specific documentation!**
+
+## What's new in the 4.x fork
+
+- **4.0.0.7** — The loading page renders *before* the OpenID token exchange, so users see "Connecting to your account…" immediately instead of a blank browser tab while Jellyfin contacts the provider. Padlock icon on the loading screen.
+- **4.0.0.6** — Login loading-screen polish: branding logo, provider name in status text, stuck-state timeout with *Try again*/*Return to login* buttons, fade-in animations (respecting `prefers-reduced-motion`), accessibility (aria-live, page title, favicon), and the correct device version reported to Jellyfin.
+- **4.0.0.5** — Cache OIDC discovery per provider (endpoints + signing keys, 15-min TTL) to cut several IdP round trips per sign-in; animated login loading screen.
+- **4.0.0.4** — Bug fixes: OIDC state-cleanup crash, thread-safe in-flight auth state (`ConcurrentDictionary`), `Unregister` now persists, null guards for providers without scopes/roles, SAML security fix.
+- **4.0.0.0** — Updated for Jellyfin 10.11 (`net9.0`).
 
 ## Tested Providers
 
@@ -59,30 +62,25 @@ This is 100% alpha software! PRs are welcome to improve the code.
 
 ## Security
 
-This is my first time writing C# so please take all of the code written here with a grain of salt. This program should be reasonably secure since it validates all information passed from the client with either a certificate or a secret internal state.
+This program should be reasonably secure since it validates all information passed from the client with either a certificate or a secret internal state. As with any authentication plugin, review the configuration carefully before exposing it to the internet. See [SECURITY.md](SECURITY.md) for how to report vulnerabilities.
 
 ## Installing
 
-Add the package repo [https://raw.githubusercontent.com/9p4/jellyfin-plugin-sso/manifest-release/manifest.json](https://raw.githubusercontent.com/9p4/jellyfin-plugin-sso/manifest-release/manifest.json) to your Jellyfin plugin repositories.
+### Plugin repository (recommended, auto-updates)
 
-Then, install the plugin from the plugin catalog!
+In Jellyfin: **Dashboard → Plugins → Repositories → Add**, and use this manifest URL:
+
+```
+https://raw.githubusercontent.com/Derksniff/jellyfin-plugin-sso/main/manifest.json
+```
+
+Then install **SSO Authentication** from the plugin catalog and restart Jellyfin.
+
+### Manual install
+
+Download `sso-auth_<version>.zip` from the [latest release](https://github.com/Derksniff/jellyfin-plugin-sso/releases), and extract its contents into a new folder under your Jellyfin `plugins/` directory (e.g. `plugins/sso-auth_<version>/`), then restart. The zip contains three DLLs: `SSO-Auth.dll`, `Duende.IdentityModel.OidcClient.dll`, and `Duende.IdentityModel.dll`. Existing SSO provider configuration carries over.
 
 See [Contributing](#contributing) for instructions on how to build from source.
-
-### (Fallback) Legacy package repo (Versions <= 3.3.0)
-
-We have transitioned to a release system that automates distribution, packaging & hosting.
-This system is new, and if something goes wrong, you can try using the old package repository as a fallback.
-
-Instead add the **old** package repository: [https://repo.ersei.net/jellyfin/manifest.json](https://repo.ersei.net/jellyfin/manifest.json) to your jellyfin plugin repositories.
-
-### Installing cutting edge/nightly builds
-
-If you're impatient/brave/feel like helping us test things out, you can install the nightly build of the plugin, which is automatically built against the main branch.
-
-The nightly build can be installed from the [main plugin repo](https://raw.githubusercontent.com/9p4/jellyfin-plugin-sso/manifest-release/manifest.json), and will always have a version number of `0.0.0.9000`.
-
-The nightly build may have new features unavailable in other builds, but **be warned**, things may change frequently in nightly builds, and things may break, and you could lose data.
 
 ## Roadmap
 
@@ -276,47 +274,29 @@ This project uses Nix flakes to manage development dependencies. Run `nix develo
 
 ## Building
 
-This is built with .NET 6.0. Build with `dotnet publish .` for the debug release in the `SSO-Auth` directory. Copy over the `IdentityModel.OidcClient.dll`, the `IdentityModel.dll` and the `SSO-Auth.dll` files in the `/bin/Debug/net6.0/publish` directory to a new folder in your Jellyfin configuration: `config/plugins/sso`.
-
-### VSCode Workflow
-
-An example `.vscode` configuration may be found at [strazto/jellyfin-plugin-sso-vscode](https://github.com/strazto/jellyfin-plugin-sso-vscode).
-
-From the root of this repo, you may clone that to `.vscode`
+This is built with **.NET 9.0**. From the repo root:
 
 ```bash
-# From repo root
-
-git clone https://github.com/strazto/jellyfin-plugin-sso-vscode .vscode
+dotnet publish SSO-Auth/SSO-Auth.csproj -c Release -o dist/publish
 ```
+
+Copy the `SSO-Auth.dll`, `Duende.IdentityModel.OidcClient.dll`, and `Duende.IdentityModel.dll` files from `dist/publish` into a new folder under your Jellyfin configuration: `config/plugins/sso`. (Only those three DLLs are needed — the rest of the publish output, such as `Newtonsoft.Json.dll` and the `Jellyfin.*` assemblies, is provided by the Jellyfin host.)
 
 ## Releasing
 
-This plugin uses [JPRM](https://github.com/oddstr13/jellyfin-plugin-repository-manager) to build the plugin. Refer to the documentation there to install JPRM.
+Releases are cut manually:
 
-Build the zipped plugin with `jprm --verbosity=debug plugin build .`.
-
-### CI Releases
-
-Anything merged to the main branch will be built and published by our CI system.
-
-Anything tagged/released as a formal Github release will also be built and published by our CI system.
-
-If you wish to use releases from your own fork, refer to
-[Installing](#installing), however, you will need to change the url to the
-manifest file, `https://raw.githubusercontent.com/9p4/jellyfin-plugin-sso/manifest-release/manifest.json`
-so that it refers to your fork.
+1. Bump `<AssemblyVersion>`/`<FileVersion>` in `SSO-Auth/SSO-Auth.csproj` and `version:` in `build.yaml`, and add a `changelog:` line to `build.yaml`.
+2. `dotnet publish` (as above), then zip exactly the three DLLs listed above at the archive root as `sso-auth_<version>.zip`.
+3. Add a new entry at the top of the `versions` array in `manifest.json` (version, changelog, `targetAbi`, `sourceUrl`, MD5 `checksum`, UTC `timestamp`).
+4. Publish a GitHub release tagged `v<version>` with the zip attached.
 
 ## Credits and Thanks
 
-Much thanks to the [Jellyfin LDAP plugin](https://github.com/jellyfin/jellyfin-plugin-ldapauth) for offering a base for me to start on my plugin.
+This plugin is a continued fork of [9p4/jellyfin-plugin-sso](https://github.com/9p4/jellyfin-plugin-sso) by [@9p4](https://github.com/9p4) and contributors. All of the original work — the protocol implementations, the admin page (by [strazto](https://github.com/strazto)), and years of fixes — is theirs; this fork carries it forward for Jellyfin 10.11.
 
-I use the [AspNet SAML](https://github.com/jitbit/AspNetSaml/) library for the SAML side of things (patched to work with Base64 on non-Windows machines).
+Much thanks to the [Jellyfin LDAP plugin](https://github.com/jellyfin/jellyfin-plugin-ldapauth) for offering a base for the original plugin.
 
-I use the [Duende IdentityModel OIDC Client](https://github.com/DuendeSoftware/foss) library for the OpenID side of things.
+The plugin uses the [AspNet SAML](https://github.com/jitbit/AspNetSaml/) library for the SAML side of things (patched to work with Base64 on non-Windows machines), and the [Duende IdentityModel OIDC Client](https://github.com/DuendeSoftware/foss) library for the OpenID side.
 
-Thanks to these projects, without which I would have been pulling my hair out implementing these protocols from scratch.
-
-## Something funny about the origins of this plugin
-
-It totally slipped my mind, but I had [requested this functionality a few years back](https://github.com/jellyfin/jellyfin/issues/2012). What goes around comes around, I guess.
+Thanks to these projects, without which implementing these protocols from scratch would have been a headache.

@@ -1,4 +1,6 @@
+using System;
 using System.Globalization;
+using System.Text;
 
 namespace Jellyfin.Plugin.SSO_Auth;
 
@@ -561,10 +563,16 @@ function setStuck() {
         var punycodeDomain = idnMapping.GetAscii(domain);
         var punycodeBaseUrl = protocol + punycodeDomain;
 
+        // Escape interpolated values for the JS string context (provider display + auth payload), and
+        // URL-encode the provider where it is used as a path segment.
+        var providerJs = EscapeJsString(provider);
+        var providerPath = Uri.EscapeDataString(provider ?? string.Empty);
+        var dataJs = EscapeJsString(data);
+
         return Base + @"
 var ssoBaseUrl = '" + punycodeBaseUrl + @"';
 var ssoWebUrl = ssoBaseUrl + '/web/index.html';
-var ssoProviderName = '" + provider + @"';
+var ssoProviderName = '" + providerJs + @"';
 var ssoProviderDisplay = ssoProviderName ? ssoProviderName.charAt(0).toUpperCase() + ssoProviderName.slice(1) : '';
 var ssoTimeout;
 
@@ -580,7 +588,7 @@ async function link(request) {
     if (jfUser == null) return;
     if (jfToken == null) return;
 
-    const url = '" + $"{punycodeBaseUrl}/sso/{mode}/Link/{provider}/" + @"' + jfUser;
+    const url = '" + $"{punycodeBaseUrl}/sso/{mode}/Link/{providerPath}/" + @"' + jfUser;
 
     return new Promise(resolve => {
        var xhr = new XMLHttpRequest();
@@ -609,7 +617,7 @@ async function main() {
 
     ssoTimeout = setTimeout(setStuck, 20000);
     setStatus('Connecting to your account...');
-    var data = '" + data + @"';
+    var data = '" + dataJs + @"';
     while (localStorage.getItem(""_deviceId2"") == null ||
         localStorage.getItem(""jellyfin_credentials"") == null ||
         JSON.parse(localStorage.getItem(""jellyfin_credentials""))['Servers'][0]['Id'] == null) {
@@ -636,7 +644,7 @@ async function main() {
     }
 
     setStatus(ssoProviderDisplay ? ('Signing in with ' + ssoProviderDisplay + '...') : 'Signing you in...');
-    var url = '" + punycodeBaseUrl + "/sso/" + mode + "/Auth/" + provider + @"';
+    var url = '" + punycodeBaseUrl + "/sso/" + mode + "/Auth/" + providerPath + @"';
 
     let response = await new Promise(resolve => {
        var xhr = new XMLHttpRequest();
@@ -687,5 +695,34 @@ document.addEventListener('DOMContentLoaded', function () {
 
 // https://stackoverflow.com/a/25435165
 </script><iframe id='iframe-main' class='docs-texteventtarget-iframe' sandbox='allow-same-origin allow-forms allow-scripts' src='' style='position: absolute;width:0;height:0;border:0;'></iframe></body></html>";
+    }
+
+    // Escapes a value for safe inclusion inside a single-quoted JavaScript string literal, including
+    // the characters needed to prevent breaking out of the string or the surrounding <script> block.
+    private static string EscapeJsString(string value)
+    {
+        if (string.IsNullOrEmpty(value))
+        {
+            return string.Empty;
+        }
+
+        var sb = new StringBuilder(value.Length);
+        foreach (var c in value)
+        {
+            switch (c)
+            {
+                case '\\': sb.Append("\\\\"); break;
+                case '\'': sb.Append("\\'"); break;
+                case '"': sb.Append("\\\""); break;
+                case '\n': sb.Append("\\n"); break;
+                case '\r': sb.Append("\\r"); break;
+                case '<': sb.Append("\\u003c"); break;
+                case '>': sb.Append("\\u003e"); break;
+                case '&': sb.Append("\\u0026"); break;
+                default: sb.Append(c); break;
+            }
+        }
+
+        return sb.ToString();
     }
 }

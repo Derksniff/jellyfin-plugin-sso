@@ -1,7 +1,7 @@
 name: "SSO Authentication"
 guid: "505ce9d1-d916-42fa-86ca-673ef241d7df"
 imageUrl: "https://raw.githubusercontent.com/9p4/jellyfin-plugin-sso/main/img/logo.png"
-version: "4.0.0.7"
+version: "5.0.0.0"
 targetAbi: "10.11.0.0"
 framework: "net9.0"
 owner: "9p4"
@@ -15,6 +15,7 @@ artifacts:
   - "Duende.IdentityModel.OidcClient.dll"
   - "Duende.IdentityModel.dll"
 changelog: |
+  5.0.0.0: First official release of the fork. SECURITY: logins are keyed on the immutable subject (OIDC sub / SAML NameID) and no longer auto-claim an existing account by username - set enableUnverifiedLinking to restore the old behavior (existing links migrate automatically on next login). SAML hardened (single-use assertions, strict validity windows, optional audience check, role enforcement on the auth endpoint). Avatar fetches are SSRF-guarded. Logging, concurrency, and robustness fixes; added tests and CI.
   4.0.0.7: Show the loading page before contacting the provider, so users see "Connecting to your account..." immediately instead of a blank tab while the OpenID token exchange runs; padlock icon on the loading screen
   4.0.0.6: Loading screen polish - branding logo, provider name, stuck/error buttons, fade-in, accessibility, correct device version
   4.0.0.5: Cache OIDC discovery per provider to cut login round trips; animated login loading screen; bug fixes (state cleanup crash, thread-safety, Unregister, null guards)

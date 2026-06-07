@@ -1,0 +1,23 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "9.0.x"
+
+      - name: Build plugin (Release)
+        run: dotnet build SSO-Auth/SSO-Auth.csproj -c Release
+
+      - name: Run tests
+        run: dotnet test SSO-Auth.Tests/SSO-Auth.Tests.csproj -c Release

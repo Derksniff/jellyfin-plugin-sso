@@ -1,3 +1,16 @@
+// Provider and canonical (IdP-supplied) names are rendered into markup below; escape them so an
+// attacker-influenced value cannot inject HTML/script into the linking page.
+const escapeHtml = (value) => {
+  const replacements = {
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+    '"': "&quot;",
+    "'": "&#39;",
+  };
+  return String(value).replace(/[&<>"']/g, (c) => replacements[c]);
+};
+
 const ssoConfigLinking = {
   pluginUniqueId: "505ce9d1-d916-42fa-86ca-673ef241d7df",
   loadProviders: (view) => {
@@ -38,7 +51,7 @@ const ssoConfigLinking = {
       provider_config.innerHTML = `
       <label
         class="inputLabel inputLabelUnfocused sso-provider-link-title"
-      >${provider_name}
+      >${escapeHtml(provider_name)}
       </label>
       <a
         class="fab emby-button sso-provider-add-link"
@@ -47,7 +60,7 @@ const ssoConfigLinking = {
       </a>
       <div
         class="sso-provider-existing-links-container"
-        data-provider="${provider_name}"
+        data-provider="${escapeHtml(provider_name)}"
       ></div>
       `;
       var add_provider = provider_config.querySelector(
@@ -60,7 +73,7 @@ const ssoConfigLinking = {
       add_provider.classList.add("sso-provider");
 
       add_provider.href = ApiClient.getUrl(
-        `/SSO/${provider_mode}/p/${provider_name}?isLinking=true`,
+        `/SSO/${provider_mode}/p/${encodeURIComponent(provider_name)}?isLinking=true`,
       );
 
       container.appendChild(provider_config);
@@ -113,12 +126,12 @@ const ssoConfigLinking = {
         <input
           is="emby-checkbox"
           class="sso-link-checkbox"
-          data-id="${canonical_name}"
-          data-mode="${provider_mode}"
-          data-provider="${provider_name}"
+          data-id="${escapeHtml(canonical_name)}"
+          data-mode="${escapeHtml(provider_mode)}"
+          data-provider="${escapeHtml(provider_name)}"
           type="checkbox"
         />
-        <span class="checkbox-label">${canonical_name}</span>
+        <span class="checkbox-label">${escapeHtml(canonical_name)}</span>
       `;
       return out;
     });
@@ -158,7 +171,7 @@ const ssoConfigLinking = {
         return ApiClient.fetch({
           type: "DELETE",
           url: ApiClient.getUrl(
-            `sso/${provider_mode}/link/${provider_name}/${currentUserId}/${canonical_name}`,
+            `sso/${provider_mode}/link/${encodeURIComponent(provider_name)}/${currentUserId}/${encodeURIComponent(canonical_name)}`,
           ),
         });
       });

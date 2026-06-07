@@ -19,7 +19,7 @@
 </a>
 </p>
 
-> **This is a continued fork.** The original [9p4/jellyfin-plugin-sso](https://github.com/9p4/jellyfin-plugin-sso) has been archived by its author. This fork picks up maintenance — it's updated for **Jellyfin 10.11** (targeting `net9.0`), with a faster, friendlier sign-in experience and ongoing bug fixes. See [What's new in the 4.x fork](#whats-new-in-the-4x-fork) below.
+> **This is a continued fork.** The original [9p4/jellyfin-plugin-sso](https://github.com/9p4/jellyfin-plugin-sso) has been archived by its author. This fork picks up maintenance — it's updated for **Jellyfin 10.11** (targeting `net9.0`), with a faster, friendlier sign-in experience and ongoing bug fixes. See [What's new in this fork](#whats-new-in-this-fork) below.
 
 This plugin allows users to sign in through an SSO provider (such as Google, Microsoft, or your own provider). This enables one-click signin.
 
@@ -35,8 +35,9 @@ This fork is actively maintained for Jellyfin 10.11. The plugin has an admin con
 
 **This README reflects the branch it is currently on! Switch tags to view version-specific documentation!**
 
-## What's new in the 4.x fork
+## What's new in this fork
 
+- **5.0.0.0** — First official release of the fork. **Security:** identities are keyed on the immutable subject (OIDC `sub` / SAML NameID) and a first-time login no longer silently claims an existing account by username (set `enableUnverifiedLinking` to restore the old behavior — existing links migrate automatically). SAML hardened with single-use assertions, strict validity-window checks, an optional audience check, and role enforcement on the auth endpoint. Avatar fetches are SSRF-guarded. Plus reduced sensitive logging, concurrency-safe link writes, null-guards, a removed dead F# project, a unit-test suite, and CI. See the [Security](#security) section.
 - **4.0.0.7** — The loading page renders *before* the OpenID token exchange, so users see "Connecting to your account…" immediately instead of a blank browser tab while Jellyfin contacts the provider. Padlock icon on the loading screen.
 - **4.0.0.6** — Login loading-screen polish: branding logo, provider name in status text, stuck-state timeout with *Try again*/*Return to login* buttons, fade-in animations (respecting `prefers-reduced-motion`), accessibility (aria-live, page title, favicon), and the correct device version reported to Jellyfin.
 - **4.0.0.5** — Cache OIDC discovery per provider (endpoints + signing keys, 15-min TTL) to cut several IdP round trips per sign-in; animated login loading screen.
@@ -63,6 +64,16 @@ This fork is actively maintained for Jellyfin 10.11. The plugin has an admin con
 ## Security
 
 This program should be reasonably secure since it validates all information passed from the client with either a certificate or a secret internal state. As with any authentication plugin, review the configuration carefully before exposing it to the internet. See [SECURITY.md](SECURITY.md) for how to report vulnerabilities.
+
+Identity hardening in this fork:
+
+- **Identity is keyed on the immutable subject** (OIDC `sub` / SAML NameID), not the mutable username, so renaming a provider account cannot cause it to collide with a different Jellyfin account.
+- **No silent account takeover by name.** A first-time login will not bind to a pre-existing account with the same username unless `enableUnverifiedLinking` is set; use the authenticated self-service linking page instead. See [Limitations](#limitations).
+- **SAML assertions are single-use.** A consumed assertion ID is remembered until it expires, so a captured assertion cannot be replayed.
+- **SAML validity windows are enforced.** `NotBefore` / `NotOnOrAfter` (on both `Conditions` and `SubjectConfirmationData`) are checked with a small clock-skew tolerance, and an assertion with no expiry is rejected.
+- **The SAML role allow-list is enforced on the auth endpoint itself**, not only on the redirect callback.
+- **Optional SAML audience validation** (`validateAudience`) rejects assertions not minted for this provider's client ID.
+- **Avatar fetches are SSRF-guarded.** Every connection (including redirects) is validated against private/loopback/link-local addresses; override per provider with `allowAvatarLocalNetwork` for a trusted LAN host.
 
 ## Installing
 
@@ -196,6 +207,8 @@ These all require authorization. Append an API key to the end of the request: `c
   - `enableLiveTvManagement`: boolean. Whether to allow Live TV management by default. This applies even if `enableLiveTvRoles` is enabled.
   - `defaultProvider`: string. The set provider then gets assigned to the user after they have logged in. If it is not set, nothing is changed. With this, a user can login with SSO but is still able to log in via other providers later. See the `Unregister` endpoint.
   - `schemeOverride`: string. Sets the scheme for URLs used. Can be useful if the plugin refuses to use HTTPS URLs.
+  - `enableUnverifiedLinking`: boolean. **Security-sensitive; defaults to false.** When `false`, a first-time SSO login will not bind to a pre-existing Jellyfin account that merely shares the same NameID/username — existing accounts must be attached through the authenticated self-service linking page (`/SSOViews/linking`) instead. Enable only if you accept that it lets an SSO identity claim an existing account (including a local administrator) by name.
+  - `validateAudience`: boolean. Defaults to false. When `true`, the assertion's `AudienceRestriction` must contain `samlClientId`, rejecting assertions minted for a different service provider that shares the same signing certificate. Recommended if your IdP sets the audience.
 - GET `SAML/Del/PROVIDER_NAME`: This removes a configuration for SAML for a given provider name.
 - GET `SAML/Get`: Lists the configurations currently available.
 
@@ -240,13 +253,14 @@ These all require authorization. Append an API key to the end of the request: `c
   - `defaultProvider`: string. The set provider then gets assigned to the user after they have logged in. If it is not set, nothing is changed. With this, a user can login with SSO but is still able to log in via other providers later. See the `Unregister` endpoint.
   - `defaultUsernameClaim`: string. The provider will use the claim to create the users' usernames. If not set, it fallbacks to `preferred_username`.
   - `avatarUrlFormat`: string. The URL format for the users avatars. OIDC claims can be used by using the `@{claim_type}` syntax. If not set, the avatars won't change.
+  - `allowAvatarLocalNetwork`: boolean. Defaults to false. Avatar URLs that resolve to private, loopback, or link-local addresses are blocked to prevent SSRF. Enable only if your avatar host is on a trusted local network.
   - `disableHttps`: boolean. Determines whether the OpenID discovery endpoint requires HTTPS.
   - `doNotValidateEndpoints`: boolean. Determines whether the OpenID discovery process will validate endpoints. This may be required for Google.
   - `doNotValidateIssuerName`: boolean. Determines whether the OpenID discovery process will validate the OpenID issuer name.
   - `schemeOverride`: string. Sets the scheme for URLs used. Can be useful if the plugin refuses to use HTTPS URLs.
+  - `enableUnverifiedLinking`: boolean. **Security-sensitive; defaults to false.** When `false`, a first-time SSO login will not bind to a pre-existing Jellyfin account that merely shares the same username — existing accounts must be attached through the authenticated self-service linking page (`/SSOViews/linking`) instead. Enable only if you accept that it lets an SSO identity claim an existing account (including a local administrator) by name.
 - GET `OID/Del/PROVIDER_NAME`: This removes a configuration for OpenID for a given provider name.
 - GET `OID/Get`: Lists the configurations currently available.
-- GET `OID/States`: Lists currently active OpenID flows in progress.
 
 ### Misc
 
@@ -254,7 +268,7 @@ These all require authorization. Append an API key to the end of the request: `c
 
 ## Limitations
 
-Logging in with an SSO account that has the same username as an existing Jellyfin account will override the permissions for the user. Use caution when overriding the administrator account!
+By default, logging in with an SSO identity will **not** silently attach to a pre-existing Jellyfin account that merely shares the same username (this previously allowed taking over a local account, including an administrator). To attach SSO to an existing account, sign in to that account and use the self-service linking page (`/SSOViews/linking`), or set `enableUnverifiedLinking` for the provider to restore the old behavior (not recommended). Existing installs are migrated automatically on each user's next login, with no re-linking required.
 
 ~~There is no GUI to sign in. You have to make it yourself! The buttons should redirect to something like this: [https://myjellyfin.example.com/sso/SAML/start/clientid](https://myjellyfin.example.com/sso/SAML/start/clientid) replacing `clientid` with the provider client ID and `SAML` with the auth scheme (either `SAML` or `OID`).~~
 

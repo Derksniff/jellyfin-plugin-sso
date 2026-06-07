@@ -55,6 +55,22 @@ public class SamlConfig
     public string SamlCertificate { get; set; }
 
     /// <summary>
+    /// Gets or sets a value indicating whether a first-time login may bind the provider identity
+    /// to a pre-existing Jellyfin account that merely shares the same name. Disabled by default:
+    /// when off, only the canonical link (created via the authenticated self-service linking page)
+    /// is trusted, so an SSO identity cannot silently take over an existing local or foreign-provider
+    /// account. Enable only if you understand the account-takeover risk it reintroduces.
+    /// </summary>
+    public bool EnableUnverifiedLinking { get; set; }
+
+    /// <summary>
+    /// Gets or sets a value indicating whether the assertion's AudienceRestriction must contain this
+    /// provider's client ID. Disabled by default for compatibility; enabling it rejects assertions
+    /// minted for a different service provider that happens to share the same signing certificate.
+    /// </summary>
+    public bool ValidateAudience { get; set; }
+
+    /// <summary>
     /// Gets or sets a value indicating whether the provider is enabled.
     /// </summary>
     public bool Enabled { get; set; }
@@ -309,6 +325,13 @@ public class OidConfig
     public string AvatarUrlFormat { get; set; }
 
     /// <summary>
+    /// Gets or sets a value indicating whether avatar fetches may target private, loopback, or
+    /// link-local addresses. Disabled by default to prevent SSRF; enable only if your avatar host
+    /// is on a trusted local network.
+    /// </summary>
+    public bool AllowAvatarLocalNetwork { get; set; }
+
+    /// <summary>
     /// Gets or sets a value indicating whether HTTPS in the discovery endpoint is required.
     /// </summary>
     public bool DisableHttps { get; set; }
@@ -332,6 +355,15 @@ public class OidConfig
     /// Gets or sets a value indicating whether the UserInfo endpoint is used to get profile data.
     /// </summary>
     public bool DoNotLoadProfile { get; set; }
+
+    /// <summary>
+    /// Gets or sets a value indicating whether a first-time login may bind the provider identity
+    /// to a pre-existing Jellyfin account that merely shares the same name. Disabled by default:
+    /// when off, only the canonical link (created via the authenticated self-service linking page)
+    /// is trusted, so an SSO identity cannot silently take over an existing local or foreign-provider
+    /// account. Enable only if you understand the account-takeover risk it reintroduces.
+    /// </summary>
+    public bool EnableUnverifiedLinking { get; set; }
 }
 
 /// <summary>

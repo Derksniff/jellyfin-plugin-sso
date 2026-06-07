@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
 using System.IO.Compression;
 using System.Security.Cryptography.X509Certificates;
@@ -23,6 +24,9 @@ namespace Jellyfin.Plugin.SSO_Auth;
 /// </summary>
 public class Response
 {
+    // Allowable clock drift between this server and the IdP when evaluating an assertion's validity window.
+    private static readonly TimeSpan ClockSkew = TimeSpan.FromMinutes(3);
+
     private readonly X509Certificate2 _certificate;
     private XmlDocument _xmlDoc;
     private XmlNamespaceManager _xmlNameSpaceManager; // we need this one to run our XPath queries on the SAML XML
@@ -122,6 +126,14 @@ public class Response
         }
 
         var reference = (Reference)signedXml.SignedInfo.References[0];
+
+        // A SAML signature must reference a same-document element ("#id"). Reject anything else
+        // (empty, null, or external) rather than letting Substring throw on a malformed value.
+        if (string.IsNullOrEmpty(reference.Uri) || !reference.Uri.StartsWith("#", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
         var id = reference.Uri.Substring(1);
 
         var idElement = signedXml.GetIdElement(_xmlDoc, id);
@@ -142,16 +154,95 @@ public class Response
         return true;
     }
 
+    // Determines whether the assertion is outside its validity window. An assertion that carries
+    // no NotOnOrAfter at all is treated as expired: without an expiry it is a bearer token that
+    // never dies, so a captured copy could be replayed forever. Both the <Conditions> and the
+    // <SubjectConfirmationData> windows are honoured, with a small clock-skew tolerance.
     private bool IsExpired()
     {
-        var expirationDate = DateTime.MaxValue;
-        var node = _xmlDoc.SelectSingleNode("/samlp:Response/saml:Assertion[1]/saml:Subject/saml:SubjectConfirmation/saml:SubjectConfirmationData", _xmlNameSpaceManager);
-        if (node != null && node.Attributes["NotOnOrAfter"] != null)
+        var now = DateTime.UtcNow;
+        bool sawNotOnOrAfter = false;
+
+        foreach (var notOnOrAfter in GetConstraintTimes("NotOnOrAfter"))
         {
-            DateTime.TryParse(node.Attributes["NotOnOrAfter"].Value, out expirationDate);
+            sawNotOnOrAfter = true;
+            if (now - ClockSkew >= notOnOrAfter)
+            {
+                return true;
+            }
         }
 
-        return DateTime.UtcNow > expirationDate.ToUniversalTime();
+        foreach (var notBefore in GetConstraintTimes("NotBefore"))
+        {
+            if (now + ClockSkew < notBefore)
+            {
+                return true;
+            }
+        }
+
+        return !sawNotOnOrAfter;
+    }
+
+    // Collects the given validity attribute (NotBefore / NotOnOrAfter) from both the assertion's
+    // <Conditions> and its <SubjectConfirmationData>, parsed as UTC.
+    private IEnumerable<DateTime> GetConstraintTimes(string attribute)
+    {
+        string[] xpaths =
+        {
+            "/samlp:Response/saml:Assertion[1]/saml:Conditions",
+            "/samlp:Response/saml:Assertion[1]/saml:Subject/saml:SubjectConfirmation/saml:SubjectConfirmationData"
+        };
+
+        foreach (var xpath in xpaths)
+        {
+            var node = _xmlDoc.SelectSingleNode(xpath, _xmlNameSpaceManager);
+            var value = node?.Attributes?[attribute]?.Value;
+            if (!string.IsNullOrEmpty(value) && TryParseSamlTime(value, out var parsed))
+            {
+                yield return parsed;
+            }
+        }
+    }
+
+    private static bool TryParseSamlTime(string value, out DateTime utc)
+    {
+        return DateTime.TryParse(
+            value,
+            CultureInfo.InvariantCulture,
+            DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal,
+            out utc);
+    }
+
+    /// <summary>
+    /// Gets the ID attribute of the signed assertion. Used to detect and reject replays of an
+    /// assertion that has already been consumed.
+    /// </summary>
+    /// <returns>The assertion ID, or null if none is present.</returns>
+    public string GetAssertionId()
+    {
+        var node = _xmlDoc.SelectSingleNode("/samlp:Response/saml:Assertion[1]", _xmlNameSpaceManager);
+        return node?.Attributes?["ID"]?.Value;
+    }
+
+    /// <summary>
+    /// Gets the latest instant at which this assertion could still be considered valid. Used to
+    /// bound how long the assertion ID must be retained for replay detection.
+    /// </summary>
+    /// <returns>The latest NotOnOrAfter (UTC) plus clock skew, or a short fallback if none exists.</returns>
+    public DateTime GetExpiry()
+    {
+        var expiry = DateTime.MinValue;
+        bool found = false;
+        foreach (var notOnOrAfter in GetConstraintTimes("NotOnOrAfter"))
+        {
+            found = true;
+            if (notOnOrAfter > expiry)
+            {
+                expiry = notOnOrAfter;
+            }
+        }
+
+        return (found ? expiry : DateTime.UtcNow) + ClockSkew;
     }
 
     /// <summary>
@@ -161,7 +252,24 @@ public class Response
     public string GetNameID()
     {
         var node = _xmlDoc.SelectSingleNode("/samlp:Response/saml:Assertion[1]/saml:Subject/saml:NameID", _xmlNameSpaceManager);
-        return node.InnerText;
+        return node?.InnerText;
+    }
+
+    /// <summary>
+    /// Gets the audiences declared in the assertion's AudienceRestriction condition. Used to confirm
+    /// the assertion was actually issued for this service provider.
+    /// </summary>
+    /// <returns>The declared audience values (may be empty).</returns>
+    public List<string> GetAudiences()
+    {
+        var nodes = _xmlDoc.SelectNodes("/samlp:Response/saml:Assertion[1]/saml:Conditions/saml:AudienceRestriction/saml:Audience", _xmlNameSpaceManager);
+        var output = new List<string>();
+        foreach (XmlNode node in nodes)
+        {
+            output.Add(node?.InnerText);
+        }
+
+        return output;
     }
 
     /// <summary>

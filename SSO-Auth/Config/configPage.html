@@ -579,6 +579,26 @@
                   </div>
                 </div>
 
+                <div
+                  class="checkboxContainer checkboxContainer-withDescription"
+                >
+                  <label>
+                    <input
+                      is="emby-checkbox"
+                      id="AllowAvatarLocalNetwork"
+                      name="AllowAvatarLocalNetwork"
+                      type="checkbox"
+                      class="sso-toggle"
+                    />
+                    <span>Allow Avatars From Local/Private Addresses</span>
+                  </label>
+                  <div class="fieldDescription checkboxFieldDescription">
+                    By default, avatar URLs that resolve to private, loopback, or
+                    link-local addresses are blocked to prevent SSRF. Enable this
+                    only if your avatar host is on a trusted local network.
+                  </div>
+                </div>
+
                 <div class="checkboxContainer">
                   <label>
                     <input
@@ -654,6 +674,37 @@
                   </label>
                   <div class="fieldDescription checkboxFieldDescription">
                     May be required for Cloudflare OpenID
+                  </div>
+                </div>
+
+                <div
+                  class="checkboxContainer checkboxContainer-withDescription"
+                >
+                  <label>
+                    <input
+                      is="emby-checkbox"
+                      id="EnableUnverifiedLinking"
+                      name="EnableUnverifiedLinking"
+                      type="checkbox"
+                      class="sso-toggle"
+                    />
+                    <span>Enable Unverified Account Linking (Insecure)</span>
+                  </label>
+                  <div class="fieldDescription checkboxFieldDescription">
+                    When enabled, a first-time SSO login is bound to any existing
+                    Jellyfin account that happens to share the same username.
+                    <br />
+                    Leave this <strong>off</strong> (default). When off, an SSO
+                    identity can only attach to an existing account through the
+                    authenticated
+                    <a
+                      is="emby-linkbutton"
+                      id="sso-self-service-link-warning"
+                      class="button-link"
+                      href="https://github.com/9p4/jellyfin-plugin-sso"
+                      >self-service linking page</a
+                    >, preventing an SSO user from silently taking over a local
+                    admin or another user's account by name.
                   </div>
                 </div>
 

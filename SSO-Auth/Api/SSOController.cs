@@ -3,8 +3,10 @@ using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Net;
 using System.Net.Http;
 using System.Net.Mime;
+using System.Net.Sockets;
 using System.Reflection;
 using System.Security.Cryptography;
 using System.Text.RegularExpressions;
@@ -30,7 +32,6 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Logging;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
-using SSO_Auth.Lib;
 
 namespace Jellyfin.Plugin.SSO_Auth.Api;
 
@@ -41,6 +42,8 @@ namespace Jellyfin.Plugin.SSO_Auth.Api;
 [Route("[controller]")]
 public class SSOController : ControllerBase
 {
+    private const string UnverifiedLinkingError = "A Jellyfin account with this username already exists and is not linked to this SSO provider. Link it from the self-service linking page while signed in to that account, or ask an administrator to enable unverified linking for this provider.";
+
     private readonly IUserManager _userManager;
     private readonly ISessionManager _sessionManager;
     private readonly IAuthorizationContext _authContext;
@@ -57,6 +60,18 @@ public class SSOController : ControllerBase
     // request, which adds multiple round trips to the IdP per sign-in.
     private static readonly ConcurrentDictionary<string, CachedProviderInfo> DiscoveryCache = new ConcurrentDictionary<string, CachedProviderInfo>();
     private static readonly TimeSpan DiscoveryCacheTtl = TimeSpan.FromMinutes(15);
+
+    // Tracks SAML assertion IDs already consumed by SamlAuth (keyed "provider|assertionId" -> assertion
+    // expiry), so a captured, still-valid assertion cannot be replayed to authenticate a second time.
+    private static readonly ConcurrentDictionary<string, DateTime> SamlReplayCache = new ConcurrentDictionary<string, DateTime>();
+
+    // Serializes canonical-link read-modify-write so concurrent logins on the same provider cannot
+    // corrupt the (non-thread-safe) dictionary or clobber each other's writes.
+    private static readonly object CanonicalLinkLock = new object();
+
+    // How long an in-flight OpenID login state is kept. Long enough to survive a slow IdP step
+    // (password + MFA), but bounded so a state cannot be matched indefinitely.
+    private static readonly TimeSpan StateTtl = TimeSpan.FromMinutes(10);
 
     /// <summary>
     /// Initializes a new instance of the <see cref="SSOController"/> class.
@@ -141,6 +156,49 @@ public class SSOController : ControllerBase
         return BadRequest("No matching provider found");
     }
 
+    // Sets the plugin's User-Agent on an outbound HTTP client.
+    private static void AddPluginUserAgent(HttpClient client)
+    {
+        var assembly = System.Reflection.Assembly.GetExecutingAssembly();
+        var fvi = System.Diagnostics.FileVersionInfo.GetVersionInfo(assembly.Location);
+        client.DefaultRequestHeaders.UserAgent.ParseAdd($"Jellyfin-Plugin-SSO-Auth +{fvi.FileVersion} (https://github.com/9p4/jellyfin-plugin-sso)");
+    }
+
+    // Builds an OidcClient (plus the options and cache metadata the caller needs to persist discovery)
+    // for the given provider and redirect URI, applying this plugin's discovery-policy security
+    // settings. Shared by the login challenge and the deferred callback exchange so the two paths
+    // cannot drift apart.
+    private (OidcClient Client, OidcClientOptions Options, string CacheKey, bool CacheHit) BuildOidcClient(string provider, OidConfig config, string redirectUri)
+    {
+        var scopes = config.OidScopes ?? Array.Empty<string>();
+        var options = new OidcClientOptions
+        {
+            Authority = config.OidEndpoint?.Trim(),
+            ClientId = config.OidClientId?.Trim(),
+            ClientSecret = config.OidSecret?.Trim(),
+            RedirectUri = redirectUri,
+            Scope = string.Join(" ", scopes.Prepend("openid profile")),
+            DisablePushedAuthorization = config.DisablePushedAuthorization,
+            LoggerFactory = _loggerFactory,
+            LoadProfile = !config.DoNotLoadProfile,
+            HttpClientFactory = o =>
+            {
+                var client = _httpClientFactory.CreateClient();
+                AddPluginUserAgent(client);
+                return client;
+            }
+        };
+        var oidEndpointUri = new Uri(config.OidEndpoint?.Trim());
+        options.Policy.Discovery.AdditionalEndpointBaseAddresses.Add(oidEndpointUri.GetLeftPart(UriPartial.Authority));
+        options.Policy.Discovery.ValidateEndpoints = !config.DoNotValidateEndpoints; // For Google and other providers with different endpoints
+        options.Policy.Discovery.RequireHttps = !config.DisableHttps;
+        options.Policy.Discovery.ValidateIssuerName = !config.DoNotValidateIssuerName;
+        options.RefreshDiscoveryOnSignatureFailure = true;
+        var cacheKey = DiscoveryCacheKey(provider, config);
+        bool cacheHit = TryApplyCachedDiscovery(options, cacheKey);
+        return (new OidcClient(options), options, cacheKey, cacheHit);
+    }
+
     /// <summary>
     /// Exchanges a deferred OpenID callback (see <see cref="OidPost"/>) with the provider,
     /// populating the supplied state with the resulting claims, roles, and access decisions.
@@ -158,36 +216,7 @@ public class SSOController : ControllerBase
 
         if (config.Enabled)
         {
-            var scopes = config.OidScopes ?? Array.Empty<string>();
-            var options = new OidcClientOptions
-            {
-                Authority = config.OidEndpoint?.Trim(),
-                ClientId = config.OidClientId?.Trim(),
-                ClientSecret = config.OidSecret?.Trim(),
-                RedirectUri = timedState.RedirectUri,
-                Scope = string.Join(" ", scopes.Prepend("openid profile")),
-                DisablePushedAuthorization = config.DisablePushedAuthorization,
-                LoggerFactory = _loggerFactory,
-                LoadProfile = !config.DoNotLoadProfile,
-                HttpClientFactory = o =>
-                {
-                    var client = _httpClientFactory.CreateClient();
-                    System.Reflection.Assembly assembly = System.Reflection.Assembly.GetExecutingAssembly();
-                    System.Diagnostics.FileVersionInfo fvi = System.Diagnostics.FileVersionInfo.GetVersionInfo(assembly.Location);
-                    string version = fvi.FileVersion;
-                    client.DefaultRequestHeaders.UserAgent.ParseAdd($"Jellyfin-Plugin-SSO-Auth +{version} (https://github.com/9p4/jellyfin-plugin-sso)");
-                    return client;
-                }
-            };
-            var oidEndpointUri = new Uri(config.OidEndpoint?.Trim());
-            options.Policy.Discovery.AdditionalEndpointBaseAddresses.Add(oidEndpointUri.GetLeftPart(UriPartial.Authority));
-            options.Policy.Discovery.ValidateEndpoints = !config.DoNotValidateEndpoints; // For Google and other providers with different endpoints
-            options.Policy.Discovery.RequireHttps = !config.DisableHttps;
-            options.Policy.Discovery.ValidateIssuerName = !config.DoNotValidateIssuerName;
-            options.RefreshDiscoveryOnSignatureFailure = true;
-            var cacheKey = DiscoveryCacheKey(provider, config);
-            bool cacheHit = TryApplyCachedDiscovery(options, cacheKey);
-            var oidcClient = new OidcClient(options);
+            var (oidcClient, options, cacheKey, cacheHit) = BuildOidcClient(provider, config, timedState.RedirectUri);
             var currentState = timedState.State;
             var result = await oidcClient.ProcessResponseAsync(timedState.CallbackQuery, currentState).ConfigureAwait(false);
             if (!cacheHit)
@@ -221,6 +250,13 @@ public class SSOController : ControllerBase
 
             foreach (var claim in result.User.Claims)
             {
+                // Capture the immutable subject identifier; it is the canonical link key (the
+                // username claim is mutable and must not be used to identify the account).
+                if (claim.Type == "sub")
+                {
+                    timedState.SubjectId = claim.Value;
+                }
+
                 if (claim.Type == (config.DefaultUsernameClaim?.Trim() ?? "preferred_username"))
                 {
                     timedState.Username = claim.Value;
@@ -373,15 +409,20 @@ public class SSOController : ControllerBase
                 }
             }
 
+            // Guarantee a canonical link key even for providers that omit "sub".
+            timedState.SubjectId ??= timedState.Username;
+
             if (timedState.Valid)
             {
                 return null;
             }
 
+            // Log only claim *types*, never their values: claim values can contain emails, group
+            // lists, or tokens that should not be written to (often shared) server logs.
             _logger.LogWarning(
-                "OpenID user {Username} has one or more incorrect role claims: {@Claims}. Expected any one of: {@ExpectedClaims}",
+                "OpenID user {Username} is missing a required role. Claim types present: {@ClaimTypes}. Expected any one of: {@ExpectedRoles}",
                 timedState.Username,
-                result.User.Claims.Select(o => new { o.Type, o.Value }),
+                result.User.Claims.Select(o => o.Type).Distinct(),
                 config.Roles);
 
             return "Error. Check permissions.";
@@ -456,37 +497,7 @@ public class SSOController : ControllerBase
 
             string redirectUri = GetRequestBase(config.SchemeOverride, config.PortOverride) + $"/sso/OID/{(newPath ? "redirect" : "r")}/" + provider;
 
-            var scopes = config.OidScopes ?? Array.Empty<string>();
-            var options = new OidcClientOptions
-            {
-                Authority = config.OidEndpoint?.Trim(),
-                ClientId = config.OidClientId?.Trim(),
-                ClientSecret = config.OidSecret?.Trim(),
-                RedirectUri = redirectUri,
-                Scope = string.Join(" ", scopes.Prepend("openid profile")),
-                DisablePushedAuthorization = config.DisablePushedAuthorization,
-                LoggerFactory = _loggerFactory,
-                LoadProfile = !config.DoNotLoadProfile,
-                HttpClientFactory = o =>
-                {
-                    var client = _httpClientFactory.CreateClient();
-                    System.Reflection.Assembly assembly = System.Reflection.Assembly.GetExecutingAssembly();
-                    System.Diagnostics.FileVersionInfo fvi = System.Diagnostics.FileVersionInfo.GetVersionInfo(assembly.Location);
-                    string version = fvi.FileVersion;
-
-                    client.DefaultRequestHeaders.UserAgent.ParseAdd($"Jellyfin-Plugin-SSO-Auth +{version} (https://github.com/9p4/jellyfin-plugin-sso)");
-                    return client;
-                }
-            };
-            var oidEndpointUri = new Uri(config.OidEndpoint?.Trim());
-            options.Policy.Discovery.AdditionalEndpointBaseAddresses.Add(oidEndpointUri.GetLeftPart(UriPartial.Authority));
-            options.Policy.Discovery.ValidateEndpoints = !config.DoNotValidateEndpoints; // For Google and other providers with different endpoints
-            options.Policy.Discovery.RequireHttps = !config.DisableHttps;
-            options.Policy.Discovery.ValidateIssuerName = !config.DoNotValidateIssuerName;
-            options.RefreshDiscoveryOnSignatureFailure = true;
-            var cacheKey = DiscoveryCacheKey(provider, config);
-            bool cacheHit = TryApplyCachedDiscovery(options, cacheKey);
-            var oidcClient = new OidcClient(options);
+            var (oidcClient, options, cacheKey, cacheHit) = BuildOidcClient(provider, config, redirectUri);
             var state = await oidcClient.PrepareLoginAsync().ConfigureAwait(false);
             if (!cacheHit)
             {
@@ -571,17 +582,6 @@ public class SSOController : ControllerBase
     }
 
     /// <summary>
-    /// This is a debug endpoint to list all running OpenID flows. Requires administrator privileges.
-    /// </summary>
-    /// <returns>The list of OpenID flows in progress.</returns>
-    [Authorize(Policy = Policies.RequiresElevation)]
-    [HttpGet("OID/States")]
-    public ActionResult OidStates()
-    {
-        return Ok(StateManager);
-    }
-
-    /// <summary>
     /// This endpoint accepts JSON and will authorize the user from the device values passed from the client.
     /// </summary>
     /// <param name="provider">Name of provider to authenticate against.</param>
@@ -604,6 +604,7 @@ public class SSOController : ControllerBase
 
         if (config.Enabled)
         {
+            Invalidate();
             foreach (var kvp in StateManager)
             {
                 if (kvp.Value.State.State.Equals(response.Data))
@@ -622,10 +623,15 @@ public class SSOController : ControllerBase
                         continue;
                     }
 
-                    Guid userId = await CreateCanonicalLinkAndUserIfNotExist("oid", provider, kvp.Value.Username);
+                    Guid? userId = await CreateCanonicalLinkAndUserIfNotExist("oid", provider, kvp.Value.SubjectId, kvp.Value.Username, config.EnableUnverifiedLinking);
+                    if (userId is null)
+                    {
+                        StateManager.TryRemove(kvp.Key, out _);
+                        return Problem(UnverifiedLinkingError);
+                    }
 
                     var authenticationResult = await Authenticate(
-                        userId,
+                        userId.Value,
                         kvp.Value.Admin,
                         config.EnableAuthorization,
                         config.EnableAllFolders,
@@ -634,7 +640,8 @@ public class SSOController : ControllerBase
                         kvp.Value.EnableLiveTvManagement,
                         response,
                         config.DefaultProvider?.Trim(),
-                        kvp.Value.AvatarURL)
+                        kvp.Value.AvatarURL,
+                        config.AllowAvatarLocalNetwork)
                         .ConfigureAwait(false);
                     StateManager.TryRemove(kvp.Key, out _);
                     return Ok(authenticationResult);
@@ -680,6 +687,11 @@ public class SSOController : ControllerBase
             if (!samlResponse.IsValid())
             {
                 return Problem("Invalid SAML signature");
+            }
+
+            if (!AudienceAllowed(config, samlResponse))
+            {
+                return Problem("SAML assertion audience does not match this service provider.");
             }
 
             bool valid = false;
@@ -849,6 +861,31 @@ public class SSOController : ControllerBase
                 return Problem("Invalid SAML signature");
             }
 
+            if (!AudienceAllowed(config, samlResponse))
+            {
+                return Problem("SAML assertion audience does not match this service provider.");
+            }
+
+            // /SAML/Auth is directly callable, so it must enforce the login role allow-list itself
+            // rather than relying on the /SAML/post check that precedes it in the browser flow.
+            var assertionRoles = samlResponse.GetCustomAttributes("Role");
+            if (config.Roles != null && config.Roles.Length > 0
+                && !assertionRoles.Any(role => config.Roles.Contains(role)))
+            {
+                _logger.LogWarning(
+                    "SAML user: {UserId} has insufficient roles: {@Roles}. Expected any one of: {@ExpectedRoles}",
+                    samlResponse.GetNameID(),
+                    assertionRoles,
+                    config.Roles);
+                return ReturnError(StatusCodes.Status401Unauthorized, "Error. Check permissions.");
+            }
+
+            // Reject replays of an assertion that has already been consumed by a previous login.
+            if (!TryConsumeSamlAssertion(provider, samlResponse))
+            {
+                return Problem("This SAML assertion has already been used. Please sign in again.");
+            }
+
             List<string> folders;
             if (!config.EnableFolderRoles && config.EnabledFolders != null)
             {
@@ -912,10 +949,20 @@ public class SSOController : ControllerBase
                 }
             }
 
-            Guid userId = await CreateCanonicalLinkAndUserIfNotExist("saml", provider, samlResponse.GetNameID());
+            string nameId = samlResponse.GetNameID();
+            if (string.IsNullOrEmpty(nameId))
+            {
+                return Problem("SAML assertion is missing a NameID");
+            }
+
+            Guid? userId = await CreateCanonicalLinkAndUserIfNotExist("saml", provider, nameId, nameId, config.EnableUnverifiedLinking);
+            if (userId is null)
+            {
+                return Problem(UnverifiedLinkingError);
+            }
 
             var authenticationResult = await Authenticate(
-                userId,
+                userId.Value,
                 isAdmin,
                 config.EnableAuthorization,
                 config.EnableAllFolders,
@@ -943,6 +990,11 @@ public class SSOController : ControllerBase
     public async Task<ActionResult> Unregister(string username, [FromBody] string provider)
     {
         User user = _userManager.GetUserByName(username);
+        if (user == null)
+        {
+            return NotFound("No user found with that username");
+        }
+
         user.AuthenticationProviderId = provider;
         await _userManager.UpdateUserAsync(user).ConfigureAwait(false);
 
@@ -973,63 +1025,93 @@ public class SSOController : ControllerBase
         return links;
     }
 
-    private async Task<Guid> CreateCanonicalLinkAndUserIfNotExist(string mode, string provider, string canonicalName)
+    /// <summary>
+    /// Resolves the Jellyfin user for an authenticated provider identity, creating the user and/or
+    /// canonical link as needed. Identity is keyed on the immutable <paramref name="subjectId"/>
+    /// (OIDC <c>sub</c> / SAML NameID), never on the mutable username, so a renamed provider identity
+    /// cannot collide with another account.
+    /// </summary>
+    /// <param name="mode">The provider mode; "saml" or "oid".</param>
+    /// <param name="provider">The provider name.</param>
+    /// <param name="subjectId">The immutable subject identifier used as the canonical link key.</param>
+    /// <param name="username">The display username used when provisioning a new account.</param>
+    /// <param name="enableUnverifiedLinking">
+    ///   Whether a first-time login may bind to a pre-existing account with the same username.
+    /// </param>
+    /// <returns>
+    ///   The Jellyfin user id, or <c>null</c> if a same-named account exists that this login is not
+    ///   permitted to take over.
+    /// </returns>
+    private async Task<Guid?> CreateCanonicalLinkAndUserIfNotExist(string mode, string provider, string subjectId, string username, bool enableUnverifiedLinking)
     {
-        User user = null;
-
-        // First try to get the user by its id in case it was already registered before
-        Guid userId = Guid.Empty;
-        try
+        if (string.IsNullOrEmpty(subjectId))
         {
-            userId = GetCanonicalLink(mode, provider, canonicalName);
-        }
-        catch (KeyNotFoundException)
-        {
-            userId = Guid.Empty;
+            subjectId = username;
         }
 
-        // No userId found? Let's try and find the user by name instead
-        if (userId == Guid.Empty)
+        // 1. The trusted path: an existing canonical link keyed on the immutable subject identifier.
+        var linkedId = TryGetCanonicalLink(mode, provider, subjectId);
+        if (linkedId != Guid.Empty)
         {
-            user = _userManager.GetUserByName(canonicalName);
-        }
-        else
-        {
-            user = _userManager.GetUserById(userId);
-        }
-
-        if (user == null)
-        {
-            _logger.LogInformation($"SSO user {canonicalName} doesn't exist, creating...");
-            user = await _userManager.CreateUserAsync(canonicalName).ConfigureAwait(false);
-            user.AuthenticationProviderId = GetType().FullName;
-            // https://jonathancrozier.com/blog/how-to-generate-a-cryptographically-secure-random-string-in-dot-net-with-c-sharp
-            user.Password = _cryptoProvider.CreatePasswordHash(Convert.ToBase64String(RandomNumberGenerator.GetBytes(64))).ToString();
-
-            // Make sure there aren't any trailing existing links
-            var links = GetCanonicalLinks(mode, provider);
-            links.Remove(canonicalName);
-            UpdateCanonicalLinkConfig(links, mode, provider);
+            var linkedUser = _userManager.GetUserById(linkedId);
+            if (linkedUser != null)
+            {
+                return linkedUser.Id;
+            }
         }
 
-        userId = Guid.Empty;
-        try
+        // 2. Migrate a legacy link keyed on the (mutable) username written by older plugin versions,
+        //    re-keying it to the subject identifier so subsequent logins use the stable key.
+        if (!string.Equals(subjectId, username, StringComparison.Ordinal))
         {
-            userId = GetCanonicalLink(mode, provider, canonicalName);
-        }
-        catch (KeyNotFoundException)
-        {
-            userId = Guid.Empty;
+            var legacyId = TryGetCanonicalLink(mode, provider, username);
+            if (legacyId != Guid.Empty)
+            {
+                var legacyUser = _userManager.GetUserById(legacyId);
+                if (legacyUser != null)
+                {
+                    MutateCanonicalLinks(mode, provider, links =>
+                    {
+                        links.Remove(username);
+                        links[subjectId] = legacyUser.Id;
+                    });
+                    _logger.LogInformation("Migrated legacy SSO link for {Username} to its subject identifier.", username);
+                    return legacyUser.Id;
+                }
+            }
         }
 
-        if (userId == Guid.Empty)
+        // 3. No link exists. A Jellyfin account may already exist with this username, but silently
+        //    claiming it is the account-takeover vector. Existing accounts are attached to an SSO
+        //    identity only through the authenticated self-service linking page, unless the operator
+        //    has explicitly opted in to unverified linking.
+        var existingByName = _userManager.GetUserByName(username);
+        if (existingByName != null)
         {
-            _logger.LogInformation("SSO user link doesn't exist, creating...");
-            userId = user.Id;
-            CreateCanonicalLink(mode, provider, userId, canonicalName);
+            if (!enableUnverifiedLinking)
+            {
+                _logger.LogWarning(
+                    "Refusing SSO login for subject {Subject}: a Jellyfin account named {Username} already exists without a link to this provider. Use self-service linking or enable unverified linking.",
+                    subjectId,
+                    username);
+                return null;
+            }
+
+            CreateCanonicalLink(mode, provider, existingByName.Id, subjectId);
+            return existingByName.Id;
         }
 
-        return userId;
+        // 4. Provision a fresh, plugin-managed account with a random password so it cannot be
+        //    logged into directly.
+        _logger.LogInformation("SSO user {Username} doesn't exist, creating...", username);
+        var user = await _userManager.CreateUserAsync(username).ConfigureAwait(false);
+        user.AuthenticationProviderId = GetType().FullName;
+        // https://jonathancrozier.com/blog/how-to-generate-a-cryptographically-secure-random-string-in-dot-net-with-c-sharp
+        user.Password = _cryptoProvider.CreatePasswordHash(Convert.ToBase64String(RandomNumberGenerator.GetBytes(64))).ToString();
+        await _userManager.UpdateUserAsync(user).ConfigureAwait(false);
+
+        CreateCanonicalLink(mode, provider, user.Id, subjectId);
+        return user.Id;
     }
 
     private Guid GetCanonicalLink(string mode, string provider, string canonicalName)
@@ -1042,6 +1124,19 @@ public class SSOController : ControllerBase
         userId = links[canonicalName];
 
         return userId;
+    }
+
+    // Returns the linked user id for a canonical name, or Guid.Empty if there is no such link.
+    private Guid TryGetCanonicalLink(string mode, string provider, string canonicalName)
+    {
+        try
+        {
+            return GetCanonicalLink(mode, provider, canonicalName);
+        }
+        catch (KeyNotFoundException)
+        {
+            return Guid.Empty;
+        }
     }
 
     /// <summary>
@@ -1100,11 +1195,9 @@ public class SSOController : ControllerBase
             return StatusCode(StatusCodes.Status409Conflict, "jellyfin UID does not match id registered to that canonical name.");
         }
 
-        var links = GetCanonicalLinks(mode, provider);
+        MutateCanonicalLinks(mode, provider, links => links.Remove(canonicalName));
 
-        links.Remove(canonicalName);
-
-        return UpdateCanonicalLinkConfig(links, mode, provider);
+        return Ok();
     }
 
     /// <summary>
@@ -1194,7 +1287,16 @@ public class SSOController : ControllerBase
             return Problem("Invalid SAML signature");
         }
 
+        if (!AudienceAllowed(config, samlResponse))
+        {
+            return Problem("SAML assertion audience does not match this service provider.");
+        }
+
         string providerUserId = samlResponse.GetNameID();
+        if (string.IsNullOrEmpty(providerUserId))
+        {
+            return Problem("SAML assertion is missing a NameID");
+        }
 
         return CreateCanonicalLink("saml", provider, jellyfinUserId, providerUserId);
     }
@@ -1223,6 +1325,7 @@ public class SSOController : ControllerBase
             return BadRequest("No matching provider found");
         }
 
+        Invalidate();
         foreach (var kvp in StateManager)
         {
             if (kvp.Value.State.State.Equals(response.Data))
@@ -1237,7 +1340,7 @@ public class SSOController : ControllerBase
 
                 if (kvp.Value.Valid)
                 {
-                    string providerUserId = kvp.Value.Username;
+                    string providerUserId = kvp.Value.SubjectId;
                     return CreateCanonicalLink("oid", provider, jellyfinUserId, providerUserId);
                 }
             }
@@ -1248,20 +1351,29 @@ public class SSOController : ControllerBase
 
     private ActionResult CreateCanonicalLink(string mode, string provider, [FromRoute] Guid jellyfinUserId, string providerUserId)
     {
-        SerializableDictionary<string, Guid> links = null;
         try
         {
-            links = GetCanonicalLinks(mode, provider);
+            MutateCanonicalLinks(mode, provider, links => links[providerUserId] = jellyfinUserId);
         }
         catch (KeyNotFoundException)
         {
             return BadRequest("No matching provider found");
         }
 
-        links[providerUserId] = jellyfinUserId;
-        UpdateCanonicalLinkConfig(links, mode, provider);
-
         return NoContent();
+    }
+
+    // Applies a mutation to a provider's canonical links under a lock, using copy-on-write: the
+    // mutation runs on a fresh copy that is then swapped in, so concurrent readers always see a
+    // complete snapshot and concurrent writers are serialized.
+    private void MutateCanonicalLinks(string mode, string provider, Action<SerializableDictionary<string, Guid>> mutate)
+    {
+        lock (CanonicalLinkLock)
+        {
+            var links = new SerializableDictionary<string, Guid>(GetCanonicalLinks(mode, provider));
+            mutate(links);
+            UpdateCanonicalLinkConfig(links, mode, provider);
+        }
     }
 
     private OkResult UpdateCanonicalLinkConfig(SerializableDictionary<string, Guid> links, string mode, string provider)
@@ -1296,7 +1408,8 @@ public class SSOController : ControllerBase
     /// <param name="authResponse">The client information to authenticate the user with.</param>
     /// <param name="defaultProvider">The default provider of the user to be set after logging in.</param>
     /// <param name="avatarUrl">The new avatar url for the user.</param>
-    private async Task<AuthenticationResult> Authenticate(Guid userId, bool isAdmin, bool enableAuthorization, bool enableAllFolders, string[] enabledFolders, bool enableLiveTv, bool enableLiveTvAdmin, AuthResponse authResponse, string defaultProvider, string avatarUrl)
+    /// <param name="allowAvatarLocalNetwork">Whether the avatar fetch may target private/loopback/link-local addresses.</param>
+    private async Task<AuthenticationResult> Authenticate(Guid userId, bool isAdmin, bool enableAuthorization, bool enableAllFolders, string[] enabledFolders, bool enableLiveTv, bool enableLiveTvAdmin, AuthResponse authResponse, string defaultProvider, string avatarUrl, bool allowAvatarLocalNetwork = false)
     {
         User user = _userManager.GetUserById(userId);
         if (enableAuthorization)
@@ -1313,27 +1426,40 @@ public class SSOController : ControllerBase
         {
             try
             {
-                using var client = _httpClientFactory.CreateClient();
+                if (!Uri.TryCreate(avatarUrl, UriKind.Absolute, out var avatarUri)
+                    || (avatarUri.Scheme != Uri.UriSchemeHttp && avatarUri.Scheme != Uri.UriSchemeHttps))
+                {
+                    throw new InvalidOperationException("Avatar URL must be an absolute http(s) URL: " + avatarUrl);
+                }
 
-                System.Reflection.Assembly assembly = System.Reflection.Assembly.GetExecutingAssembly();
-                System.Diagnostics.FileVersionInfo fvi = System.Diagnostics.FileVersionInfo.GetVersionInfo(assembly.Location);
-                string version = fvi.FileVersion;
-                client.DefaultRequestHeaders.UserAgent.ParseAdd($"Jellyfin-Plugin-SSO-Auth +{version} (https://github.com/9p4/jellyfin-plugin-sso)");
+                // Dedicated client whose connections are validated against SSRF (see CreateAvatarHttpClient).
+                using var client = CreateAvatarHttpClient(allowAvatarLocalNetwork);
+                AddPluginUserAgent(client);
 
-                var avatarResponse = await client.GetAsync(avatarUrl);
+                var avatarResponse = await client.GetAsync(avatarUri);
 
                 if (!avatarResponse.Content.Headers.TryGetValues("content-type", out var contentTypeList))
                 {
                     throw new Exception("Cannot get Content-Type of image : " + avatarUrl);
                 }
 
-                var contentType = contentTypeList.First();
-                if (!contentType.StartsWith("image"))
+                // Allow-list known raster image types and map to a safe extension. This rejects
+                // image/svg+xml (an SVG profile image can carry script) and fixes the missing-dot
+                // filename ("profile" + extension).
+                var mediaType = contentTypeList.First().Split(';')[0].Trim().ToLowerInvariant();
+                var extension = mediaType switch
                 {
-                    throw new Exception("Content type of avatar URL is not an image, got :  " + contentType);
+                    "image/png" => ".png",
+                    "image/jpeg" => ".jpg",
+                    "image/gif" => ".gif",
+                    "image/webp" => ".webp",
+                    _ => null
+                };
+                if (extension is null)
+                {
+                    throw new InvalidOperationException("Unsupported avatar content type: " + mediaType);
                 }
 
-                var extension = contentType.Split("/").Last();
                 var stream = await avatarResponse.Content.ReadAsStreamAsync();
 
                 if (user != null)
@@ -1349,7 +1475,7 @@ public class SSOController : ControllerBase
 
                     user.ProfileImage = new ImageInfo(Path.Combine(userDataPath, "profile" + extension));
 
-                    await _providerManager.SaveImage(stream, contentType, user.ProfileImage.Path)
+                    await _providerManager.SaveImage(stream, mediaType, user.ProfileImage.Path)
                         .ConfigureAwait(false);
                 }
             }
@@ -1383,16 +1509,136 @@ public class SSOController : ControllerBase
         return await _sessionManager.AuthenticateDirect(authRequest).ConfigureAwait(false);
     }
 
+    // Builds an HttpClient for fetching avatars whose every connection (including redirect hops) is
+    // validated at connect time, so a malicious or user-influenced avatar URL cannot be used for SSRF
+    // against loopback/private/link-local addresses (e.g. cloud metadata at 169.254.169.254). Validating
+    // the resolved address we actually dial also closes the DNS-rebinding window.
+    private static HttpClient CreateAvatarHttpClient(bool allowLocalNetwork)
+    {
+        var handler = new SocketsHttpHandler
+        {
+            ConnectCallback = async (context, cancellationToken) =>
+            {
+                var addresses = await Dns.GetHostAddressesAsync(context.DnsEndPoint.Host, cancellationToken).ConfigureAwait(false);
+                foreach (var address in addresses)
+                {
+                    if (!allowLocalNetwork && IsDisallowedAddress(address))
+                    {
+                        continue;
+                    }
+
+                    var socket = new Socket(SocketType.Stream, ProtocolType.Tcp) { NoDelay = true };
+                    try
+                    {
+                        await socket.ConnectAsync(address, context.DnsEndPoint.Port, cancellationToken).ConfigureAwait(false);
+                        return new NetworkStream(socket, ownsSocket: true);
+                    }
+                    catch
+                    {
+                        socket.Dispose();
+                        throw;
+                    }
+                }
+
+                throw new InvalidOperationException("Refusing to fetch avatar from a non-public address: " + context.DnsEndPoint.Host);
+            }
+        };
+
+        return new HttpClient(handler, disposeHandler: true);
+    }
+
+    // True for addresses that must not be reachable via an avatar fetch: loopback, private, link-local
+    // (incl. the cloud metadata service), CGNAT, unique/site-local IPv6, and unspecified addresses.
+    private static bool IsDisallowedAddress(IPAddress address)
+    {
+        if (address.IsIPv4MappedToIPv6)
+        {
+            address = address.MapToIPv4();
+        }
+
+        if (IPAddress.IsLoopback(address))
+        {
+            return true;
+        }
+
+        if (address.AddressFamily == AddressFamily.InterNetwork)
+        {
+            // Blocks 0.0.0.0/8, 10/8, 100.64/10 (CGNAT), 169.254/16 (link-local incl. metadata),
+            // 172.16/12, and 192.168/16.
+            var b = address.GetAddressBytes();
+            return b[0] == 0
+                || b[0] == 10
+                || (b[0] == 100 && b[1] >= 64 && b[1] <= 127)
+                || (b[0] == 169 && b[1] == 254)
+                || (b[0] == 172 && b[1] >= 16 && b[1] <= 31)
+                || (b[0] == 192 && b[1] == 168);
+        }
+
+        if (address.AddressFamily == AddressFamily.InterNetworkV6)
+        {
+            // Blocks link-local (fe80::/10), site-local (fec0::/10), and unique-local (fc00::/7).
+            return address.IsIPv6LinkLocal
+                || address.IsIPv6SiteLocal
+                || (address.GetAddressBytes()[0] & 0xFE) == 0xFC
+                || address.Equals(IPAddress.IPv6Any);
+        }
+
+        return true;
+    }
+
     private void Invalidate()
     {
         var now = DateTime.UtcNow;
         foreach (var kvp in StateManager)
         {
-            if (now.Subtract(kvp.Value.Created).TotalMinutes > 1)
+            if (now.Subtract(kvp.Value.Created) > StateTtl)
             {
                 StateManager.TryRemove(kvp.Key, out _);
             }
         }
+    }
+
+    // Records a signature-valid SAML assertion as consumed, returning false if it has already been
+    // used (a replay). Only assertions that have passed signature and validity-window checks reach
+    // here, so the cache cannot be poisoned with forged IDs.
+    private static bool TryConsumeSamlAssertion(string provider, Response samlResponse)
+    {
+        var now = DateTime.UtcNow;
+
+        // Drop entries for assertions that can no longer be valid anyway.
+        foreach (var entry in SamlReplayCache)
+        {
+            if (now > entry.Value)
+            {
+                SamlReplayCache.TryRemove(entry.Key, out _);
+            }
+        }
+
+        var assertionId = samlResponse.GetAssertionId();
+        if (string.IsNullOrEmpty(assertionId))
+        {
+            // No usable assertion ID means single use cannot be guaranteed; reject to be safe.
+            return false;
+        }
+
+        return SamlReplayCache.TryAdd(provider + "|" + assertionId, samlResponse.GetExpiry());
+    }
+
+    // Confirms the assertion was issued for this service provider when audience validation is enabled.
+    private static bool AudienceAllowed(SamlConfig config, Response samlResponse)
+    {
+        if (!config.ValidateAudience)
+        {
+            return true;
+        }
+
+        var expected = config.SamlClientId?.Trim();
+        if (string.IsNullOrEmpty(expected))
+        {
+            return false;
+        }
+
+        return samlResponse.GetAudiences().Any(audience => string.Equals(audience?.Trim(), expected, StringComparison.Ordinal));
     }
 
     private string GetRequestBase(string schemeOverride = null, int? portOverride = null)
@@ -1542,6 +1788,7 @@ public class TimedAuthorizeState
         EnableLiveTv = false;
         EnableLiveTvManagement = false;
         AvatarURL = null;
+        SubjectId = null;
         Processed = false;
         ProcessError = null;
         ProcessLock = new SemaphoreSlim(1, 1);
@@ -1566,6 +1813,11 @@ public class TimedAuthorizeState
     /// Gets or sets the user tied to the state.
     /// </summary>
     public string Username { get; set; }
+
+    /// <summary>
+    /// Gets or sets the immutable subject identifier (OIDC <c>sub</c> claim) used as the canonical link key.
+    /// </summary>
+    public string SubjectId { get; set; }
 
     /// <summary>
     /// Gets or sets a value indicating whether the user is an administrator.

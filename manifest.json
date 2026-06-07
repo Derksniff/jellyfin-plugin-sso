@@ -9,6 +9,14 @@
     "imageUrl": "https://raw.githubusercontent.com/Derksniff/jellyfin-plugin-sso/main/img/logo.png",
     "versions": [
       {
+        "version": "5.0.0.0",
+        "changelog": "First official release of the fork. SECURITY: logins are keyed on the immutable subject (OIDC sub / SAML NameID) and no longer auto-claim an existing account by username - set enableUnverifiedLinking to restore the old behavior (existing links migrate automatically on next login). SAML hardened (single-use assertions, strict validity windows, optional audience check, role enforcement on the auth endpoint). Avatar fetches are SSRF-guarded. Logging, concurrency, and robustness fixes; added tests and CI.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/Derksniff/jellyfin-plugin-sso/releases/download/v5.0.0.0/sso-auth_5.0.0.0.zip",
+        "checksum": "d78670d00a375ff935b4cbe257121dc6",
+        "timestamp": "2026-06-07T01:34:25Z"
+      },
+      {
         "version": "4.0.0.7",
         "changelog": "The loading page now renders before the OpenID token exchange, so users see \"Connecting to your account...\" immediately instead of a blank tab while the provider is contacted. Login logo replaced with a padlock icon.",
         "targetAbi": "10.11.0.0",
